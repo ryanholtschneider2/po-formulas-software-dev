@@ -1,0 +1,55 @@
+[project]
+name = "po-formulas-software-dev"
+version = "0.1.0"
+description = "po formula pack: actor-critic software development pipeline (plan/build/review/verify/ralph)"
+requires-python = ">=3.11"
+dependencies = [
+    "prefect-orchestration",
+    "prefect>=3.0",
+]
+
+# ─── Entry points ── core's `po list` / `po run <name>` auto-discover these.
+# Adding a new formula to this pack = one line here + one @flow in the module.
+[project.entry-points."po.formulas"]
+software-dev-full = "po_formulas.software_dev:software_dev_full"
+software-dev-fast = "po_formulas.software_dev:software_dev_fast"
+software-dev-edit = "po_formulas.software_dev:software_dev_edit"
+epic = "po_formulas.epic:epic_run"
+graph = "po_formulas.graph:graph_run"
+minimal-task = "po_formulas.minimal_task:minimal_task"
+code-health-review = "po_formulas.code_health:code_health_review"
+
+# Scheduled / manual deployments (cron, interval, or no-schedule for UI-triggered).
+# Core's `po deploy` calls register() to collect RunnerDeployment objects.
+[project.entry-points."po.deployments"]
+software-dev = "po_formulas.deployments:register"
+
+# Pack-contributed `po doctor` checks. Each entry is a zero-arg callable
+# returning a `prefect_orchestration.doctor.DoctorCheck`.
+[project.entry-points."po.doctor_checks"]
+agent-cli-present = "po_formulas.checks:selected_agent_cli_present"
+
+# Pack-shipped utility ops dispatched as `po <command>` (NOT `po run`).
+# These skip Prefect overhead per principle §4.
+[project.entry-points."po.commands"]
+summarize-verdicts = "po_formulas.commands:summarize_verdicts"
+planning-init = "po_formulas.commands:planning_init"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["po_formulas"]
+
+# Install this pack alongside core during development:
+#   uv add --editable ../prefect-orchestration
+#   uv add --editable .
+#
+# Then from any beads-initialized rig:
+#   po list
+#   po run software-dev-full --issue-id <id> --rig <name> --rig-path <path>
+#   po run epic --epic-id <id> --rig <name> --rig-path <path>
+
+[tool.uv.sources]
+prefect-orchestration = { path = "../../../prefect-orchestration", editable = true }

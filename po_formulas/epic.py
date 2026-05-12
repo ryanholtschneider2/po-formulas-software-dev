@@ -1,0 +1,150 @@
+"""Prefect flow: `epic_run`.
+
+Thin wrapper over `graph_run` (prefect-orchestration-uc0): delegates to
+edge-driven sub-graph traversal with `traverse=("parent-child", "blocks")`.
+
+Discovery is controlled by two new parameters
+(prefect-orchestration-h5s):
+
+- ``discover``: which mode `list_epic_children` should use —
+  ``ids`` (dot-suffix probe; gas-city legacy), ``deps`` (`bd dep` graph
+  walk), or ``both`` (default; deps order first, then dot-suffix-only
+  ids appended).
+- ``child_ids``: comma-separated explicit override that bypasses
+  discovery entirely. Each listed id must exist and be open; the DAG
+  is built from `bd dep` edges *between* the listed ids (out-of-set
+  blockers are dropped).
+
+The dot-suffix fallback in older builds was implicit ("if deps returned
+nothing, probe ids"). It is now explicit: pick `discover=both` to keep
+the old behaviour, `discover=deps` to opt out of the legacy probe, or
+`discover=ids` to opt out of the bd-dep walk.
+
+Concurrency is a deploy-time concern:
+
+    prefect work-pool create po --type process --concurrency-limit 4
+    prefect concurrency-limit create critic 2
+    prefect concurrency-limit create builder 3
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from prefect import flow, get_run_logger
+
+from prefect_orchestration.beads_meta import (
+    VALID_DISCOVER_MODES,
+    collect_explicit_children,
+    list_epic_children,
+)
+
+from po_formulas.graph import (
+    _check_formula_signature,
+    _dispatch_nodes,
+    _resolve_formula,
+    _tag_root_run,
+)
+
+
+def _legacy_dot_suffix_children(epic_id: str) -> list[dict[str, Any]]:
+    """Adapter kept for `tests/test_epic_legacy_dot_suffix.py`.
+
+    Pre-h5s the helper did its own legacy→graph shape adaptation; today
+    `list_epic_children(mode="ids")` returns the graph shape directly,
+    so this is a one-line shim that exists only to keep the test
+    boundary stable.
+    """
+    return list_epic_children(epic_id, mode="ids")
+
+
+def _parse_child_ids(raw: str) -> list[str]:
+    """Split ``"a, b ,c"`` → ``["a", "b", "c"]``; drop empties.
+
+    Validation (existence, dup detection, closed filtering) lives in
+    `collect_explicit_children` so the same checks apply to any caller.
+    """
+    return [tok.strip() for tok in raw.split(",") if tok.strip()]
+
+
+@flow(name="epic_run", flow_run_name="{epic_id}", log_prints=True)
+def epic_run(
+    epic_id: str,
+    rig: str,
+    rig_path: str,
+    iter_cap: int = 3,
+    plan_iter_cap: int = 2,
+    verify_iter_cap: int = 3,
+    ralph_iter_cap: int = 3,
+    dry_run: bool = False,
+    max_issues: int | None = None,
+    discover: str = "both",
+    child_ids: str | None = None,
+) -> dict[str, Any]:
+    """Fan out an epic's open children as concurrent software_dev_full runs.
+
+    Args:
+        epic_id: beads epic ID (e.g. "sr-8yu" or
+            "prefect-orchestration-3cu").
+        max_issues: if set, only submit the first N topo-sorted children.
+            Useful for testing "one issue at a time" before unleashing.
+        discover: which discovery mode to use — ``ids`` (dot-suffix
+            probe), ``deps`` (`bd dep` graph walk), or ``both`` (union;
+            default). Ignored when ``child_ids`` is supplied.
+        child_ids: comma-separated explicit override. Skips discovery
+            and submits exactly these ids in topo order built from
+            their `bd dep --type=blocks` edges. Each id must exist and
+            be open; closed ids raise (reopen first).
+    """
+    logger = get_run_logger()
+    _tag_root_run(epic_id, logger, extra_tag=f"epic_id:{epic_id}")
+
+    if discover not in VALID_DISCOVER_MODES:
+        raise ValueError(
+            f"unknown discover mode {discover!r}; valid: {list(VALID_DISCOVER_MODES)}"
+        )
+
+    if child_ids:
+        ids = _parse_child_ids(child_ids)
+        if not ids:
+            raise ValueError("--child-ids was set but parsed to an empty list")
+        # Thread rig_path so bd shellouts target the rig's `.beads/`,
+        # not the Python (Prefect runner) cwd. See prefect-orchestration-3mw.
+        nodes = collect_explicit_children(ids, rig_path=rig_path)
+        logger.info(
+            f"--child-ids supplied; bypassing discovery, "
+            f"dispatching {len(nodes)} explicit node(s): {ids}"
+        )
+    else:
+        nodes = list_epic_children(epic_id, mode=discover, rig_path=rig_path)
+        logger.info(
+            f"discovered {len(nodes)} node(s) under {epic_id} via mode={discover}"
+        )
+
+    if not nodes:
+        logger.warning(
+            f"no open/in-progress children under {epic_id} "
+            f"(discover={discover!r}, child_ids={child_ids!r})"
+        )
+        return {"status": "empty", "epic_id": epic_id}
+
+    formula_callable = _resolve_formula("software-dev-full")
+    _check_formula_signature("software-dev-full", formula_callable)
+
+    out = _dispatch_nodes(
+        nodes=nodes,
+        rig=rig,
+        rig_path=rig_path,
+        formula_callable=formula_callable,
+        parent_bead=epic_id,
+        iter_caps={
+            "iter_cap": iter_cap,
+            "plan_iter_cap": plan_iter_cap,
+            "verify_iter_cap": verify_iter_cap,
+            "ralph_iter_cap": ralph_iter_cap,
+        },
+        dry_run=dry_run,
+        max_issues=max_issues,
+        logger=logger,
+    )
+    return {"epic_id": epic_id, **out}

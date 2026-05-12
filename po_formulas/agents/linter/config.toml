@@ -1,0 +1,14 @@
+# Per-role runtime config — applies to BOTH software_dev_full and software_dev_fast.
+#
+# Linter is overwhelmingly Bash (run lint cmd → fix errors). Trace data from
+# 5vh/oiu showed 100% Bash tool use, 22 turns × 8s/turn opus latency = ~3 min
+# wall when sonnet handles the same workload in ~45s for 80% lower cost.
+# Effort=low because lint-fix doesn't benefit from extended thinking.
+#
+# Override at the operator level with `--model opus --effort high` on `po
+# run` if you ever need to: per-role config.toml > CLI flag > env > default.
+# Wait, that's wrong — per-role config WINS over CLI. To override this you'd
+# have to edit/remove this file or pass a different agent_dir. That's
+# intentional: pack-author defaults beat operator one-offs.
+model = "sonnet"
+effort = "low"
