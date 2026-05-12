@@ -52,4 +52,6 @@ packages = ["po_formulas"]
 #   po run epic --epic-id <id> --rig <name> --rig-path <path>
 
 [tool.uv.sources]
-prefect-orchestration = { path = "../../../prefect-orchestration", editable = true }
+# Path is relative to this pyproject.toml. Works when this repo is
+# cloned as a sibling of prefect-orchestration (canonical layout).
+prefect-orchestration = { path = "../../prefect-orchestration", editable = true }
