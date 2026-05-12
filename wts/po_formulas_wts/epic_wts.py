@@ -148,15 +148,30 @@ def epic_wts(
         out["verdict"] = "passed"
         return out
     try:
-        pr_out = pr_writer(epic_id=epic_id, rig=rig, rig_path=str(rig_path_p))
+        pr_out = pr_writer(
+            epic_id=epic_id,
+            rig=rig,
+            rig_path=str(rig_path_p),
+            dry_run=dry_run,
+        )
         out["pr_writer"] = pr_out
-        out["verdict"] = "passed"
+        # pr_writer returns verdict in {"PASS", "HALT"}. HALT = agent
+        # stopped cleanly (rebase conflict, non-FF push reject, etc.) —
+        # gates green but no PR opened. Report `partial` so the operator
+        # sees both the green gates and the halt reason.
+        if pr_out.get("verdict") == "PASS":
+            out["verdict"] = "passed"
+        else:
+            out["verdict"] = "partial"
+            logger.warning(
+                "epic_wts: pr_writer HALT (%s); gates green but PR not opened",
+                pr_out.get("reason", "no reason given"),
+            )
     except NotImplementedError as exc:
-        # pr_writer is a stub in this pack until prefect-orchestration-3pt
-        # ports the runtime from software-dev-pack-wts. All gates passed,
-        # so report partial success — operator can write the PR body
-        # manually (or via /pr-format) until 3pt lands.
-        logger.warning("epic_wts: pr_writer stub (3pt pending): %s", exc)
+        # Defensive — pr_writer was a stub until prefect-orchestration-3pt
+        # landed. Kept so an accidental revert of pr_writer.py surfaces
+        # a clear "partial" verdict instead of crashing the chain.
+        logger.warning("epic_wts: pr_writer stub unexpectedly active: %s", exc)
         out["pr_writer"] = {"skipped": True, "reason": str(exc)}
         out["verdict"] = "partial"
     return out
