@@ -78,7 +78,9 @@ class WorktreePaths:
 # ─── Operations ───
 
 
-def _run(cmd: list[str], *, cwd: Path | str, check: bool = True) -> subprocess.CompletedProcess:
+def _run(
+    cmd: list[str], *, cwd: Path | str, check: bool = True
+) -> subprocess.CompletedProcess:
     """Shell out with stdout/stderr captured. Raises with full context on `check`."""
     proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
     if check and proc.returncode != 0:
@@ -97,9 +99,7 @@ def _is_git_repo(path: Path) -> bool:
     would report True even though it isn't its own repo. That false
     positive made `git worktree add` attach the worktree to the OUTER
     repo's history, with confusing results."""
-    proc = _run(
-        ["git", "rev-parse", "--show-toplevel"], cwd=path, check=False
-    )
+    proc = _run(["git", "rev-parse", "--show-toplevel"], cwd=path, check=False)
     if proc.returncode != 0:
         return False
     return Path(proc.stdout.strip()).resolve() == path.resolve()
@@ -285,7 +285,9 @@ def cleanup_worktree(
         args.append(str(paths.worktree))
         proc = _run(args, cwd=paths.main_rig, check=False)
         if proc.returncode != 0:
-            logger.warning("worktree: remove failed (%s); leaving as-is", proc.stderr.strip())
+            logger.warning(
+                "worktree: remove failed (%s); leaving as-is", proc.stderr.strip()
+            )
 
     if delete_branch:
         proc = _run(

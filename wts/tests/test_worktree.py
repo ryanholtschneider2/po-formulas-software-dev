@@ -32,9 +32,7 @@ from po_formulas_wts.worktree import (
 
 
 def _git(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
-    proc = subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True
-    )
+    proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
     if check and proc.returncode != 0:
         raise RuntimeError(f"git {args} failed: {proc.stderr}")
     return proc
@@ -309,7 +307,7 @@ def test_shared_dir_symlinks_are_not_staged_in_worktree(rig: Path):
     merge into main fails with 'would lose untracked files'."""
     wt = setup_worktree(rig, "demo")
     (wt / "real-change.txt").write_text("yes\n")
-    proc = _git("add", "-A", cwd=wt)
+    _git("add", "-A", cwd=wt)
     proc_status = _git("status", "--porcelain", cwd=wt)
     # Only real-change.txt should appear staged.
     staged = [line for line in proc_status.stdout.splitlines() if line.strip()]
