@@ -156,8 +156,8 @@ def test_setup_worktree_idempotent(rig: Path):
     assert wt1.is_dir()
 
 
-def test_setup_worktree_skips_missing_shared_dirs(tmp_path: Path):
-    """If .beads/ or .planning/ doesn't exist in main rig, skip silently."""
+def test_setup_worktree_creates_shared_dirs_when_missing(tmp_path: Path):
+    """Missing .beads/.planning in main rig are created + symlinked (not skipped)."""
     repo = tmp_path / "rig"
     repo.mkdir()
     _git("init", "-q", "-b", "main", cwd=repo)
@@ -166,11 +166,32 @@ def test_setup_worktree_skips_missing_shared_dirs(tmp_path: Path):
     (repo / "a.txt").write_text("hi\n")
     _git("add", "a.txt", cwd=repo)
     _git("commit", "-q", "-m", "init", cwd=repo)
-    # No .beads or .planning here
+    # No .beads or .planning in main — they should be auto-created and symlinked
     wt = setup_worktree(repo, "no-shared")
     assert wt.is_dir()
-    assert not (wt / ".beads").exists()
-    assert not (wt / ".planning").exists()
+    assert (repo / ".beads").is_dir()
+    assert (wt / ".beads").is_symlink()
+    assert (wt / ".beads").resolve() == (repo / ".beads").resolve()
+    assert (repo / ".planning").is_dir()
+    assert (wt / ".planning").is_symlink()
+    assert (wt / ".planning").resolve() == (repo / ".planning").resolve()
+
+
+def test_setup_worktree_refuses_nonempty_real_dir_in_worktree(tmp_path: Path):
+    """When git tracked .beads and materializes it in the worktree, raise RuntimeError."""
+    repo = tmp_path / "rig"
+    repo.mkdir()
+    _git("init", "-q", "-b", "main", cwd=repo)
+    _git("config", "user.email", "test@example.com", cwd=repo)
+    _git("config", "user.name", "Test", cwd=repo)
+    (repo / "a.txt").write_text("hello\n")
+    (repo / ".beads").mkdir()
+    (repo / ".beads" / "metadata.json").write_text('{"dolt_mode": "embedded"}')
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "init with .beads", cwd=repo)
+    # .beads is tracked; git worktree add materializes a real non-empty .beads/ in the wt
+    with pytest.raises(RuntimeError, match=r"git rm -rf \.beads"):
+        setup_worktree(repo, "demo", shared_dirs=(".beads",))
 
 
 def test_setup_worktree_rejects_non_git_dir(tmp_path: Path):

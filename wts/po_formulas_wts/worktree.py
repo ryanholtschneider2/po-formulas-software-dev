@@ -106,8 +106,7 @@ def _is_git_repo(path: Path) -> bool:
 
 
 def _ensure_symlink(src: Path, dst: Path) -> None:
-    """Create `dst` as a symlink to `src`. Idempotent; logs and skips if
-    a regular file/dir is already in the way."""
+    """Create `dst` as a symlink to `src`. Idempotent."""
     if dst.exists() or dst.is_symlink():
         if dst.is_symlink() and dst.resolve() == src.resolve():
             return  # already correct
@@ -117,11 +116,10 @@ def _ensure_symlink(src: Path, dst: Path) -> None:
             try:
                 dst.rmdir()
             except OSError:
-                logger.warning(
-                    "worktree: %s exists and isn't a clean symlink target; leaving alone",
-                    dst,
+                raise RuntimeError(
+                    f"worktree: {dst} exists as a real directory (git likely tracked it). "
+                    f"Fix: cd {dst.parent} && git rm -rf {dst.name} && git commit -m 'stop tracking {dst.name}'"
                 )
-                return
         else:
             return
     dst.symlink_to(src.resolve())
@@ -195,9 +193,7 @@ def setup_worktree(
 
     for name in shared_dirs:
         src = paths.main_rig / name
-        if not src.exists():
-            logger.info("worktree: shared dir %s missing in main rig; skipping symlink", src)
-            continue
+        src.mkdir(parents=True, exist_ok=True)
         _ensure_symlink(src, paths.worktree / name)
 
     return paths.worktree
