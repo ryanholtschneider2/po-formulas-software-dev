@@ -15,3 +15,8 @@ dist/
 .beads/embeddeddolt/
 .beads/dolt/
 .beads/dolt-server.*
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
