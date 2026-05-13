@@ -132,8 +132,13 @@ def epic_run(
         )
         return {"status": "empty", "epic_id": epic_id}
 
-    formula_callable = _resolve_formula("software-dev-full")
-    _check_formula_signature("software-dev-full", formula_callable)
+    # NOTE (po-formulas-software-dev-1y0): the *-wts* variant accepts
+    # `parent_epic_worktree=...` and runs `agent_step` inside the shared
+    # epic worktree. The bare `software-dev-full` would silently ignore
+    # those kwargs and run in the main rig, sending child commits to
+    # `main` instead of `wts-<epic-id>`.
+    formula_callable = _resolve_formula("software-dev-full-wts")
+    _check_formula_signature("software-dev-full-wts", formula_callable)
 
     out = _dispatch_nodes(
         nodes=nodes,

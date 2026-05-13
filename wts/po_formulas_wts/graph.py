@@ -306,6 +306,34 @@ def _build_pc_ancestor_index(
     return result
 
 
+def _promote_to_wts(name: str) -> str:
+    """Map a parent-pack formula name to its `-wts` sibling if one exists.
+
+    Resolves both names against the `po.formulas` EP group; returns the
+    `-wts` variant when present, otherwise the original (so non-dev
+    formulas like `agent-step`, `prompt`, `skill-evals` pass through
+    untouched). Idempotent — names already ending in `-wts` return as-is.
+
+    Why this matters: when a bead's `po.formula` metadata is stamped as
+    `software-dev-full` and the dispatch happens from `epic_run_wts` /
+    `graph_run_wts` (this pack), we want the wts-aware variant that
+    accepts `parent_epic_worktree=...` and `cd`s into the shared epic
+    worktree before running its agent. Without promotion the parent
+    `software-dev-full` is resolved instead, silently ignoring
+    `parent_epic_worktree`, and the agent commits to the main rig — see
+    po-formulas-software-dev-1y0.
+    """
+    if name.endswith("-wts"):
+        return name
+    wts_name = f"{name}-wts"
+    try:
+        eps = entry_points(group="po.formulas")
+    except TypeError:
+        eps = entry_points().get("po.formulas", [])  # type: ignore[assignment]
+    available = {ep.name for ep in eps}
+    return wts_name if wts_name in available else name
+
+
 def _resolve_per_bead_formula(
     node: dict[str, Any],
     *,
@@ -323,6 +351,10 @@ def _resolve_per_bead_formula(
       - ``None`` when the bead is a human/sync-point (po.formula in
         {none, no, human, skip} or unresolvable name) — caller should
         skip dispatch and poll for closure.
+
+    Auto-promotes the requested name to its `-wts` sibling when one
+    exists (see `_promote_to_wts`) so stamped beads dispatched from an
+    epic_run_wts/graph_run_wts get the worktree-aware variant.
 
     ``list_subgraph`` returns lean rows (no metadata) so we fetch the
     bead's metadata lazily here via ``_bd_show`` — one extra shell per
@@ -346,8 +378,14 @@ def _resolve_per_bead_formula(
         return default_callable
     if str(requested).lower() in {"none", "no", "human", "skip"}:
         return None
+    promoted = _promote_to_wts(str(requested))
+    if promoted != str(requested):
+        logger.info(
+            "dispatch %s: promoting po.formula=%r → %r (wts context)",
+            node["id"], requested, promoted,
+        )
     try:
-        return _resolve_formula(str(requested))
+        return _resolve_formula(promoted)
     except ValueError as exc:
         logger.warning(
             "skip dispatch %s: po.formula=%r unresolvable (%s)",
@@ -364,7 +402,11 @@ def graph_run(
     rig: str,
     rig_path: str,
     traverse: str | Iterable[str] = ",".join(DEFAULT_TRAVERSE),
-    formula: str = "software-dev-full",
+    # NOTE (po-formulas-software-dev-1y0): default to the -wts variant so
+    # graph_run_wts dispatches children into the per-bead/per-epic
+    # worktrees its own _dispatch_nodes prepared. The bare
+    # `software-dev-full` would commit to the main rig instead.
+    formula: str = "software-dev-full-wts",
     max_issues: int | None = None,
     include_closed: bool = False,
     root_as_node: bool = False,
