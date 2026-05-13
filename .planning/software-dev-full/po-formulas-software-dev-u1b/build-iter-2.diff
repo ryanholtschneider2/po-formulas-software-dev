@@ -1,0 +1,229 @@
+diff --git a/.planning/software-dev-full/po-formulas-software-dev-u1b/decision-log.md b/.planning/software-dev-full/po-formulas-software-dev-u1b/decision-log.md
+index c0adcbb..ff0313a 100644
+--- a/.planning/software-dev-full/po-formulas-software-dev-u1b/decision-log.md
++++ b/.planning/software-dev-full/po-formulas-software-dev-u1b/decision-log.md
+@@ -9,3 +9,7 @@
+ - **Decision**: Retry detection requires `epic_id`, `work_dir`, and `branch` metadata before reusing a worktree.
+   **Why**: A standalone bead can also have branch/work_dir-like metadata; requiring `epic_id` avoids guessing and falls back to legacy standalone behavior when metadata is incomplete.
+   **Alternatives considered**: Reusing any existing `metadata.work_dir`, which could route standalone retries into the wrong checkout.
++
++- **Decision**: Moved the epic-level documenter step before remote CI instead of running CI twice.
++  **Why**: The build critic correctly found that `merge_worktree()` commits pending documenter changes before merge; running docs before CI keeps the pushed/check-passed branch byte-for-byte aligned with the branch that finalize merges.
++  **Alternatives considered**: Leaving docs after CI and rerunning remote CI, which would be slower and would still make the success order harder to reason about.
+diff --git a/wts/po_formulas_wts/epic_finalize.py b/wts/po_formulas_wts/epic_finalize.py
+index f8fa65f..2c0fafd 100644
+--- a/wts/po_formulas_wts/epic_finalize.py
++++ b/wts/po_formulas_wts/epic_finalize.py
+@@ -518,9 +518,26 @@ def epic_finalize(
+         if result.returncode != 0:
+             failures.append(f"smoke_cmd failed (rc={result.returncode})")
+ 
+-    # 5c. Remote-CI gate — push + wait for `gh pr checks` to clear.
+-    #     Runs only if local gates green so far (avoids burning CI on
+-    #     work we already know is broken).
++    # 5c. Docs update via agent (needs judgment — uses documenter role).
++    #    Pass run_dir explicitly so build_context_md doesn't try to write
++    #    into the default `.planning/software-dev-full/<seed>/` path (which
++    #    doesn't exist for an epic that never went through software-dev-full).
++    if not dry_run:
++        _agent_step_task(
++            agent_dir=_agent_dir("documenter"),
++            task=_task_md("documenter"),
++            seed_id=epic_id,
++            rig_path=str(repo_path),
++            run_dir=run_dir,
++            step="docs",
++            iter_n=1,
++            ctx={"epic_id": epic_id, "failures": failures, "run_dir": str(run_dir)},
++            dry_run=False,
++        )
++
++    # 5d. Remote-CI gate — push + wait for `gh pr checks` to clear.
++    #     Runs after every branch-mutating finalize step so the branch
++    #     merged below is the same branch CI validated.
+     ci_result: dict[str, Any] = {"verdict": "skipped", "summary": "not run"}
+     if not skip_remote_ci and not failures and not dry_run:
+         if branch_name:
+@@ -550,23 +567,6 @@ def epic_finalize(
+             "summary": f"local gates failed ({len(failures)}); not pushing",
+         }
+ 
+-    # 6. Docs update via agent (needs judgment — uses documenter role).
+-    #    Pass run_dir explicitly so build_context_md doesn't try to write
+-    #    into the default `.planning/software-dev-full/<seed>/` path (which
+-    #    doesn't exist for an epic that never went through software-dev-full).
+-    if not dry_run:
+-        _agent_step_task(
+-            agent_dir=_agent_dir("documenter"),
+-            task=_task_md("documenter"),
+-            seed_id=epic_id,
+-            rig_path=str(repo_path),
+-            run_dir=run_dir,
+-            step="docs",
+-            iter_n=1,
+-            ctx={"epic_id": epic_id, "failures": failures, "run_dir": str(run_dir)},
+-            dry_run=False,
+-        )
+-
+     # 7. Write post-flight artifact.
+     post_flight = run_dir / "post-flight.md"
+     status = "PASSED" if not failures else "FAILED"
+diff --git a/wts/tests/test_epic_wts.py b/wts/tests/test_epic_wts.py
+index e428f31..14d44d7 100644
+--- a/wts/tests/test_epic_wts.py
++++ b/wts/tests/test_epic_wts.py
+@@ -219,3 +219,56 @@ def test_epic_finalize_merges_shared_worktree(
+             },
+         }
+     ]
++
++
++def test_epic_finalize_runs_docs_before_remote_ci_and_merge(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    rig = tmp_path / "rig"
++    rig.mkdir()
++    shared = tmp_path / "rig.wt-epic"
++    shared.mkdir()
++    events: list[str] = []
++
++    monkeypatch.setattr(finalize_mod, "list_epic_children", lambda *_a, **_kw: [])
++    monkeypatch.setattr(
++        finalize_mod,
++        "get_run_logger",
++        lambda: logging.getLogger(__name__),
++    )
++    monkeypatch.setattr(finalize_mod, "_run_make", lambda *_a, **_kw: (0, "ok"))
++    monkeypatch.setattr(finalize_mod, "_stamp_metadata", lambda *_a, **_kw: None)
++    monkeypatch.setattr(
++        finalize_mod,
++        "_agent_step_task",
++        lambda **_kwargs: events.append(str(_kwargs["step"]))
++        or SimpleNamespace(verdict="approved", summary=""),
++    )
++    monkeypatch.setattr(
++        finalize_mod,
++        "_run_remote_ci_gate",
++        lambda *_a, **_kw: events.append("remote-ci")
++        or {"verdict": "passed", "summary": "ok", "pr": 1},
++    )
++    monkeypatch.setattr(
++        finalize_mod,
++        "merge_worktree",
++        lambda *_a, **_kw: events.append("merge") or "main",
++    )
++    monkeypatch.setattr(finalize_mod, "close_issue", lambda *_a, **_kw: None)
++
++    out = finalize_mod.epic_finalize.fn(
++        epic_id="epic",
++        rig="rig",
++        rig_path=str(rig),
++        spec_path="",
++        skip_walkthrough=True,
++        skip_demo_video=True,
++        skip_remote_ci=False,
++        worktree_path=str(shared),
++        branch="wts-epic",
++        merge_target_branch="main",
++    )
++
++    assert out["status"] == "PASSED"
++    assert events == ["docs", "remote-ci", "merge"]
+diff --git a/wts/tests/test_software_dev_worktree.py b/wts/tests/test_software_dev_worktree.py
+index d3cbbfb..262e39f 100644
+--- a/wts/tests/test_software_dev_worktree.py
++++ b/wts/tests/test_software_dev_worktree.py
+@@ -97,6 +97,93 @@ def test_retry_uses_existing_worktree_metadata(
+     }
+ 
+ 
++@pytest.mark.parametrize(
++    "metadata",
++    [
++        {"work_dir": "/tmp/rig.wt-epic", "branch": "wts-epic"},
++        {"work_dir": "/tmp/rig.wt-epic", "epic_id": "epic"},
++        {"branch": "wts-epic", "epic_id": "epic"},
++    ],
++)
++def test_retry_ignores_incomplete_worktree_metadata(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metadata: dict[str, str]
++) -> None:
++    main = tmp_path / "rig"
++    main.mkdir()
++
++    monkeypatch.setattr(sd_mod, "_bd_metadata", lambda *_args, **_kw: metadata)
++
++    ctx = sd_mod._resolve_epic_worktree_context(
++        "child-1",
++        main,
++        parent_epic_worktree=None,
++        parent_epic_branch=None,
++        parent_epic_id=None,
++        parent_epic_merge_target=None,
++    )
++
++    assert ctx is None
++
++
++def test_shared_epic_context_stamps_retry_metadata(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    main = tmp_path / "rig"
++    main.mkdir()
++    shared = tmp_path / "rig.wt-epic"
++    shared.mkdir()
++    stamped: dict[str, str] = {}
++    claimed: list[str] = []
++    closed: list[str] = []
++
++    monkeypatch.setattr(sd_mod, "_agent_step_task", _fake_agent_step)
++    monkeypatch.setattr(sd_mod, "get_run_logger", lambda: logging.getLogger(__name__))
++    monkeypatch.setattr(
++        sd_mod,
++        "_read_triage_flags",
++        lambda _rig_path, _seed_id: {"complexity": "simple"},
++    )
++    monkeypatch.setattr(sd_mod, "_bd_metadata", lambda *_args, **_kw: {})
++    monkeypatch.setattr(
++        sd_mod,
++        "_stamp_metadata",
++        lambda _issue_id, _rig_path, values: stamped.update(values),
++    )
++    monkeypatch.setattr(
++        sd_mod,
++        "claim_issue",
++        lambda issue_id, **_kwargs: claimed.append(issue_id),
++    )
++    monkeypatch.setattr(
++        sd_mod,
++        "close_issue",
++        lambda issue_id, **_kwargs: closed.append(issue_id),
++    )
++
++    out = sd_mod.software_dev_full.fn(
++        issue_id="child-1",
++        rig="rig",
++        rig_path=str(main),
++        claim=True,
++        dry_run=False,
++        parent_epic_worktree=str(shared),
++        parent_epic_branch="wts-epic",
++        parent_epic_id="epic",
++        parent_epic_merge_target="release",
++    )
++
++    assert out["status"] == "completed"
++    assert out["epic_managed_worktree"] is True
++    assert claimed == ["child-1"]
++    assert closed == ["child-1"]
++    assert stamped == {
++        "work_dir": str(shared.resolve()),
++        "branch": "wts-epic",
++        "merge_target_branch": "release",
++        "epic_id": "epic",
++    }
++
++
+ def test_standalone_full_wts_still_creates_worktree(
+     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+ ) -> None:

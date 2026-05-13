@@ -97,6 +97,93 @@ def test_retry_uses_existing_worktree_metadata(
     }
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"work_dir": "/tmp/rig.wt-epic", "branch": "wts-epic"},
+        {"work_dir": "/tmp/rig.wt-epic", "epic_id": "epic"},
+        {"branch": "wts-epic", "epic_id": "epic"},
+    ],
+)
+def test_retry_ignores_incomplete_worktree_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metadata: dict[str, str]
+) -> None:
+    main = tmp_path / "rig"
+    main.mkdir()
+
+    monkeypatch.setattr(sd_mod, "_bd_metadata", lambda *_args, **_kw: metadata)
+
+    ctx = sd_mod._resolve_epic_worktree_context(
+        "child-1",
+        main,
+        parent_epic_worktree=None,
+        parent_epic_branch=None,
+        parent_epic_id=None,
+        parent_epic_merge_target=None,
+    )
+
+    assert ctx is None
+
+
+def test_shared_epic_context_stamps_retry_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = tmp_path / "rig"
+    main.mkdir()
+    shared = tmp_path / "rig.wt-epic"
+    shared.mkdir()
+    stamped: dict[str, str] = {}
+    claimed: list[str] = []
+    closed: list[str] = []
+
+    monkeypatch.setattr(sd_mod, "_agent_step_task", _fake_agent_step)
+    monkeypatch.setattr(sd_mod, "get_run_logger", lambda: logging.getLogger(__name__))
+    monkeypatch.setattr(
+        sd_mod,
+        "_read_triage_flags",
+        lambda _rig_path, _seed_id: {"complexity": "simple"},
+    )
+    monkeypatch.setattr(sd_mod, "_bd_metadata", lambda *_args, **_kw: {})
+    monkeypatch.setattr(
+        sd_mod,
+        "_stamp_metadata",
+        lambda _issue_id, _rig_path, values: stamped.update(values),
+    )
+    monkeypatch.setattr(
+        sd_mod,
+        "claim_issue",
+        lambda issue_id, **_kwargs: claimed.append(issue_id),
+    )
+    monkeypatch.setattr(
+        sd_mod,
+        "close_issue",
+        lambda issue_id, **_kwargs: closed.append(issue_id),
+    )
+
+    out = sd_mod.software_dev_full.fn(
+        issue_id="child-1",
+        rig="rig",
+        rig_path=str(main),
+        claim=True,
+        dry_run=False,
+        parent_epic_worktree=str(shared),
+        parent_epic_branch="wts-epic",
+        parent_epic_id="epic",
+        parent_epic_merge_target="release",
+    )
+
+    assert out["status"] == "completed"
+    assert out["epic_managed_worktree"] is True
+    assert claimed == ["child-1"]
+    assert closed == ["child-1"]
+    assert stamped == {
+        "work_dir": str(shared.resolve()),
+        "branch": "wts-epic",
+        "merge_target_branch": "release",
+        "epic_id": "epic",
+    }
+
+
 def test_standalone_full_wts_still_creates_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

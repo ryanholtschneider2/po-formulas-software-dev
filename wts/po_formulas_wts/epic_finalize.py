@@ -518,9 +518,26 @@ def epic_finalize(
         if result.returncode != 0:
             failures.append(f"smoke_cmd failed (rc={result.returncode})")
 
-    # 5c. Remote-CI gate — push + wait for `gh pr checks` to clear.
-    #     Runs only if local gates green so far (avoids burning CI on
-    #     work we already know is broken).
+    # 5c. Docs update via agent (needs judgment — uses documenter role).
+    #    Pass run_dir explicitly so build_context_md doesn't try to write
+    #    into the default `.planning/software-dev-full/<seed>/` path (which
+    #    doesn't exist for an epic that never went through software-dev-full).
+    if not dry_run:
+        _agent_step_task(
+            agent_dir=_agent_dir("documenter"),
+            task=_task_md("documenter"),
+            seed_id=epic_id,
+            rig_path=str(repo_path),
+            run_dir=run_dir,
+            step="docs",
+            iter_n=1,
+            ctx={"epic_id": epic_id, "failures": failures, "run_dir": str(run_dir)},
+            dry_run=False,
+        )
+
+    # 5d. Remote-CI gate — push + wait for `gh pr checks` to clear.
+    #     Runs after every branch-mutating finalize step so the branch
+    #     merged below is the same branch CI validated.
     ci_result: dict[str, Any] = {"verdict": "skipped", "summary": "not run"}
     if not skip_remote_ci and not failures and not dry_run:
         if branch_name:
@@ -549,23 +566,6 @@ def epic_finalize(
             "verdict": "skipped",
             "summary": f"local gates failed ({len(failures)}); not pushing",
         }
-
-    # 6. Docs update via agent (needs judgment — uses documenter role).
-    #    Pass run_dir explicitly so build_context_md doesn't try to write
-    #    into the default `.planning/software-dev-full/<seed>/` path (which
-    #    doesn't exist for an epic that never went through software-dev-full).
-    if not dry_run:
-        _agent_step_task(
-            agent_dir=_agent_dir("documenter"),
-            task=_task_md("documenter"),
-            seed_id=epic_id,
-            rig_path=str(repo_path),
-            run_dir=run_dir,
-            step="docs",
-            iter_n=1,
-            ctx={"epic_id": epic_id, "failures": failures, "run_dir": str(run_dir)},
-            dry_run=False,
-        )
 
     # 7. Write post-flight artifact.
     post_flight = run_dir / "post-flight.md"

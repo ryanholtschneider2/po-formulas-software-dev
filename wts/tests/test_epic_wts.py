@@ -219,3 +219,56 @@ def test_epic_finalize_merges_shared_worktree(
             },
         }
     ]
+
+
+def test_epic_finalize_runs_docs_before_remote_ci_and_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    shared = tmp_path / "rig.wt-epic"
+    shared.mkdir()
+    events: list[str] = []
+
+    monkeypatch.setattr(finalize_mod, "list_epic_children", lambda *_a, **_kw: [])
+    monkeypatch.setattr(
+        finalize_mod,
+        "get_run_logger",
+        lambda: logging.getLogger(__name__),
+    )
+    monkeypatch.setattr(finalize_mod, "_run_make", lambda *_a, **_kw: (0, "ok"))
+    monkeypatch.setattr(finalize_mod, "_stamp_metadata", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        finalize_mod,
+        "_agent_step_task",
+        lambda **_kwargs: events.append(str(_kwargs["step"]))
+        or SimpleNamespace(verdict="approved", summary=""),
+    )
+    monkeypatch.setattr(
+        finalize_mod,
+        "_run_remote_ci_gate",
+        lambda *_a, **_kw: events.append("remote-ci")
+        or {"verdict": "passed", "summary": "ok", "pr": 1},
+    )
+    monkeypatch.setattr(
+        finalize_mod,
+        "merge_worktree",
+        lambda *_a, **_kw: events.append("merge") or "main",
+    )
+    monkeypatch.setattr(finalize_mod, "close_issue", lambda *_a, **_kw: None)
+
+    out = finalize_mod.epic_finalize.fn(
+        epic_id="epic",
+        rig="rig",
+        rig_path=str(rig),
+        spec_path="",
+        skip_walkthrough=True,
+        skip_demo_video=True,
+        skip_remote_ci=False,
+        worktree_path=str(shared),
+        branch="wts-epic",
+        merge_target_branch="main",
+    )
+
+    assert out["status"] == "PASSED"
+    assert events == ["docs", "remote-ci", "merge"]
