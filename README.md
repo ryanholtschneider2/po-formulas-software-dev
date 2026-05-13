@@ -7,7 +7,7 @@ This monorepo ships **two installable packages side-by-side**:
 | Subdir | Distribution | What it provides |
 |---|---|---|
 | [`parent/`](./parent) | `po-formulas-software-dev` | The canonical pipeline: `software-dev-full` / `software-dev-fast` / `software-dev-edit`, `epic`, `epic-finalize`, `minimal-task`, `pre-pr-review`, `pr-writer`, `code-health-review`, `skill-evals`, `prompt`, `graph`, plus 18 role prompts. |
-| [`wts/`](./wts) | `po-formulas-software-dev-wts` | Worktree-aware fork. Same flow bodies as `parent/` with `*-wts` EP keys; on flow entry each bead runs in its own `git worktree` at `<rig>.wt-<sanitized-id>/` so concurrent siblings can't conflict on shared source files. Adds `epic-finalize-wts` with an LLM spec-auditor + 27 pytest unit tests for the worktree machinery. |
+| [`wts/`](./wts) | `po-formulas-software-dev-wts` | Worktree-aware fork. Same flow bodies as `parent/` with `*-wts` EP keys; standalone issue flows run in `git worktree`s at `<rig>.wt-<sanitized-id>/`, while `epic-wts` runs all children in one shared epic worktree at `<rig>.wt-<sanitized-epic-id>/` on branch `wts-<sanitized-epic-id>`. Adds `epic-finalize-wts` with an LLM spec-auditor and pytest coverage for the worktree machinery. |
 
 Both packages register entry points under `po.formulas` / `po.deployments` / `po.doctor_checks` / `po.commands` and coexist in the same venv (the `-wts` suffix on every EP key prevents collisions).
 
@@ -27,7 +27,7 @@ uv pip install -e wts
 
 ## Why two packages
 
-`wts` was forked from `parent` to add git-worktree isolation (each bead gets its own working tree, with `.beads/` and `.planning/` symlinked back to the main rig so bd ops and run-dir artifacts stay authoritative in one place). The fork keeps the EP namespace clean — operators opt in by running `po run software-dev-full-wts` instead of `po run software-dev-full`. Once the worktree pattern soaks in across formulas the two will likely converge again, but for now keeping them as two distributions lets us iterate on `wts` without disturbing the canonical pack.
+`wts` was forked from `parent` to add git-worktree isolation. Standalone issue flows get their own working tree, and `epic-wts` creates one working tree for the whole epic so serialized children build on the same branch without per-child merge churn. In both cases `.beads/` and `.planning/` are symlinked back to the main rig so bd ops and run-dir artifacts stay authoritative in one place. The fork keeps the EP namespace clean — operators opt in by running `po run software-dev-full-wts` instead of `po run software-dev-full`. Once the worktree pattern soaks in across formulas the two will likely converge again, but for now keeping them as two distributions lets us iterate on `wts` without disturbing the canonical pack.
 
 See [`parent/README.md`](./parent/README.md) and [`wts/README.md`](./wts/README.md) for per-package detail.
 
@@ -45,7 +45,7 @@ po-formulas-software-dev/
     ├── pyproject.toml
     ├── po_formulas_wts/       # includes worktree.py + epic_finalize.py
     ├── overlay/
-    └── tests/                 # test_worktree.py: 27 pytests passing
+    └── tests/                 # worktree and flow pytest coverage
 ```
 
 Both subdirs ship their own `pyproject.toml`, `tests/`, and overlay. Cross-subdir imports are forbidden — each package stands on its own. Shared deps (`prefect-orchestration`) are sourced via each `pyproject.toml`'s `[tool.uv.sources]` block, with paths relative to that file.
