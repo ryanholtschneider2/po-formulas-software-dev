@@ -290,6 +290,78 @@ def _write_scoped_tests_artifact(
         return []
 
 
+def _bd_metadata(bead_id: str, rig_path: Path) -> dict[str, Any]:
+    proc = subprocess.run(
+        ["bd", "show", bead_id, "--json"],
+        cwd=str(rig_path),
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return {}
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {}
+    row = data[0] if isinstance(data, list) and data else data
+    if not isinstance(row, dict):
+        return {}
+    metadata = row.get("metadata") or {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _stamp_metadata(bead_id: str, rig_path: Path, values: dict[str, str]) -> None:
+    for key, value in values.items():
+        subprocess.run(
+            ["bd", "update", bead_id, "--set-metadata", f"{key}={value}"],
+            cwd=str(rig_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+
+def _resolve_epic_worktree_context(
+    issue_id: str,
+    main_rig_path: Path,
+    *,
+    parent_epic_worktree: str | None,
+    parent_epic_branch: str | None,
+    parent_epic_id: str | None,
+    parent_epic_merge_target: str | None,
+) -> dict[str, str] | None:
+    if parent_epic_worktree:
+        work_dir = Path(parent_epic_worktree).expanduser().resolve()
+        if not work_dir.exists():
+            raise RuntimeError(f"parent epic worktree does not exist: {work_dir}")
+        return {
+            "work_dir": str(work_dir),
+            "branch": parent_epic_branch or "",
+            "epic_id": parent_epic_id or "",
+            "merge_target_branch": parent_epic_merge_target or "main",
+        }
+
+    metadata = _bd_metadata(issue_id, main_rig_path)
+    work_dir_raw = str(metadata.get("work_dir") or "").strip()
+    branch = str(metadata.get("branch") or "").strip()
+    epic_id = str(metadata.get("epic_id") or "").strip()
+    if not (work_dir_raw and branch and epic_id):
+        return None
+    work_dir = Path(work_dir_raw).expanduser().resolve()
+    if not work_dir.exists():
+        return None
+    return {
+        "work_dir": str(work_dir),
+        "branch": branch,
+        "epic_id": epic_id,
+        "merge_target_branch": str(
+            metadata.get("merge_target_branch") or parent_epic_merge_target or "main"
+        ),
+    }
+
+
 def _compute_work_landed(run_dir: Path) -> bool:
     """True iff at least one builder iteration produced a non-empty diff.
 
@@ -441,6 +513,10 @@ def software_dev_full(
     enable_ralph: bool = False,
     enable_full_test_gate: bool = False,
     use_worktree: bool = True,
+    parent_epic_worktree: str | None = None,
+    parent_epic_branch: str | None = None,
+    parent_epic_id: str | None = None,
+    parent_epic_merge_target: str | None = None,
 ) -> dict[str, Any]:
     """Plain-Python software_dev_full body. Each role = one `agent_step` call.
 
@@ -459,6 +535,14 @@ def software_dev_full(
     """
     logger = get_run_logger()
     main_rig_path_p = Path(rig_path).expanduser().resolve()
+    epic_worktree_context = _resolve_epic_worktree_context(
+        issue_id,
+        main_rig_path_p,
+        parent_epic_worktree=parent_epic_worktree,
+        parent_epic_branch=parent_epic_branch,
+        parent_epic_id=parent_epic_id,
+        parent_epic_merge_target=parent_epic_merge_target,
+    )
 
     # Worktree isolation. When enabled (default), each bead runs in its
     # own git worktree at `<rig>.wt-<id>/` on branch `wts-<id>`.
@@ -467,7 +551,16 @@ def software_dev_full(
     # Disable via use_worktree=False or env PO_WTS_NO_WORKTREE=1.
     rig_path_p = main_rig_path_p
     worktree_enabled = False
-    if use_worktree and not os.environ.get("PO_WTS_NO_WORKTREE"):
+    epic_managed_worktree = False
+    if epic_worktree_context is not None:
+        rig_path_p = Path(epic_worktree_context["work_dir"]).expanduser().resolve()
+        epic_managed_worktree = True
+        logger.info(
+            "worktree: using parent epic worktree %s on branch %s",
+            rig_path_p,
+            epic_worktree_context.get("branch") or "(unknown)",
+        )
+    elif use_worktree and not os.environ.get("PO_WTS_NO_WORKTREE"):
         try:
             from po_formulas_wts.worktree import _is_git_repo, setup_worktree
             if _is_git_repo(main_rig_path_p):
@@ -505,6 +598,20 @@ def software_dev_full(
         # 0. Claim the seed (in_progress + assignee).
         if claim and not dry_run:
             claim_issue(issue_id, assignee=f"po-{os.getpid()}", rig_path=rig_path_p)
+            if epic_worktree_context is not None:
+                _stamp_metadata(
+                    issue_id,
+                    main_rig_path_p,
+                    {
+                        "work_dir": epic_worktree_context["work_dir"],
+                        "branch": epic_worktree_context.get("branch") or "",
+                        "merge_target_branch": epic_worktree_context.get(
+                            "merge_target_branch"
+                        )
+                        or "main",
+                        "epic_id": epic_worktree_context.get("epic_id") or "",
+                    },
+                )
 
         # 1. Triage — agent reads the user's issue (the seed bead's
         #    description), classifies, writes triage.json verdict file.
@@ -967,6 +1074,7 @@ def software_dev_full(
             "is_docs_only": is_docs_only,
             "has_ui": has_ui,
             "worktree_merged_into": merged_into,
+            "epic_managed_worktree": epic_managed_worktree,
         }
     except BaseException as exc:
         _record_flow_outcome(run_dir, exc, issue_id, str(main_rig_path_p))

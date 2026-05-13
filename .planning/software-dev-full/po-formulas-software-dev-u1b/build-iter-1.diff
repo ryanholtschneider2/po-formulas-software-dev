@@ -1,0 +1,1164 @@
+diff --git a/.planning/software-dev-full/po-formulas-software-dev-u1b/decision-log.md b/.planning/software-dev-full/po-formulas-software-dev-u1b/decision-log.md
+new file mode 100644
+index 0000000..c0adcbb
+--- /dev/null
++++ b/.planning/software-dev-full/po-formulas-software-dev-u1b/decision-log.md
+@@ -0,0 +1,11 @@
++- **Decision**: Reused the existing `wts-<sanitized-id>` branch and `<rig>.wt-<sanitized-id>/` path logic for epics.
++  **Why**: The plan chose this naming to preserve the existing worktree contract while changing lifecycle ownership from child to epic.
++  **Alternatives considered**: A separate `wts-epic-<id>` prefix, which would add a second naming convention without a current collision case.
++
++- **Decision**: Let `epic_wts` own shared worktree setup and `epic_finalize` own merge/cleanup, while `software_dev_full` only reuses stamped context.
++  **Why**: This keeps standalone child runs unchanged and gives failed epics a single preserved forensic worktree.
++  **Alternatives considered**: Creating the worktree inside `epic_run`, which would make that graph wrapper responsible for WTS-specific lifecycle details.
++
++- **Decision**: Retry detection requires `epic_id`, `work_dir`, and `branch` metadata before reusing a worktree.
++  **Why**: A standalone bead can also have branch/work_dir-like metadata; requiring `epic_id` avoids guessing and falls back to legacy standalone behavior when metadata is incomplete.
++  **Alternatives considered**: Reusing any existing `metadata.work_dir`, which could route standalone retries into the wrong checkout.
+diff --git a/wts/README.md b/wts/README.md
+index 0a1a9f9..4bfa86b 100644
+--- a/wts/README.md
++++ b/wts/README.md
+@@ -27,6 +27,12 @@ A formula pack for [`prefect-orchestration`](../../../prefect-orchestration)
+   and stamps `metadata.validation = passed | blocked` on the epic so
+   the PR-writer can gate. Invoke with `--epic-id <id>` or
+   `--branch <name>` (mutually exclusive).
++- **`epic-wts`** — end-to-end epic runner. It creates one shared
++  worktree for the epic at `<rig-path>.wt-<sanitized-epic-id>/` on
++  branch `wts-<sanitized-epic-id>`, runs every child
++  `software-dev-full-wts` flow inside that worktree, reviews and
++  finalizes the accumulated branch, then merges it into the configured
++  target branch and removes the worktree after green gates.
+ 
+ `epic` and `minimal-task` are NOT registered by this pack — use the
+ parent `po-formulas-software-dev` registrations for those today.
+@@ -146,6 +152,35 @@ po run epic --epic-id sr-8yu --rig site --rig-path ... \
+ po run software-dev-full --dry-run --issue-id sr-8yu.3 ...
+ ```
+ 
++### Epic WTS shared worktree lifecycle
++
++`epic-wts` owns the worktree lifecycle for its children. At the start
++of an epic run it creates or reuses:
++
++```text
++<rig-path>.wt-<sanitized-epic-id>/  on branch  wts-<sanitized-epic-id>
++```
++
++The epic bead is stamped with `metadata.work_dir`, `metadata.branch`,
++and `metadata.merge_target_branch`. Each child `software-dev-full-wts`
++run receives the same values and stamps its own metadata with
++`work_dir`, `branch`, `merge_target_branch`, and `epic_id`. That durable
++metadata lets `po retry <child-id>` re-enter the existing epic worktree
++instead of creating a per-child `<rig>.wt-<child-id>/`.
++
++Child flows skip their standalone worktree setup and per-child merge
++when an epic-managed worktree is present. Their commits land directly
++on `wts-<sanitized-epic-id>`. If a child, review, finalize, smoke, or
++CI step fails, the shared worktree is intentionally preserved for
++inspection and retry.
++
++After `epic_finalize_wts` passes local gates and remote CI for the epic
++branch, it merges `wts-<sanitized-epic-id>` into
++`metadata.merge_target_branch` (default `main`) and removes the shared
++worktree. Parallel `epic-wts` runs against the same rig are isolated by
++their distinct sanitized epic ids, so they use different worktree paths
++and branches.
++
+ ### Epic discovery modes
+ 
+ `epic_run` resolves the children of `--epic-id` using one of three
+diff --git a/wts/po_formulas_wts/agents/spec-auditor/prompt.md b/wts/po_formulas_wts/agents/spec-auditor/prompt.md
+index 0a768a3..c17e71d 100644
+--- a/wts/po_formulas_wts/agents/spec-auditor/prompt.md
++++ b/wts/po_formulas_wts/agents/spec-auditor/prompt.md
+@@ -2,6 +2,19 @@ You are the **spec-auditor** for an epic that's just finished its child beads. Y
+ 
+ You are the LAST gate before close. If you miss a gap, the epic closes "PASSED" with broken features.
+ 
++# Working directory
++
++This pipeline uses git worktrees. If `metadata.work_dir` is set on the seed
++bead, cd there at session start so audits, commands, and file reads happen on
++the worktree's branch. Falls through cleanly if absent.
++
++```bash
++WORK_DIR=$(bd show {{seed_id}} --json | jq -r '.[0].metadata.work_dir // empty')
++if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
++  cd "$WORK_DIR"
++fi
++```
++
+ # What you do
+ 
+ 1. **Read the spec** at `{{spec_path}}` end to end. Note every capability, every subcommand, every CLI flag, every endpoint, every response field, every behavior the spec calls out. List them mentally as ACs.
+diff --git a/wts/po_formulas_wts/epic.py b/wts/po_formulas_wts/epic.py
+index cb8febb..640dfb9 100644
+--- a/wts/po_formulas_wts/epic.py
++++ b/wts/po_formulas_wts/epic.py
+@@ -80,6 +80,10 @@ def epic_run(
+     max_issues: int | None = None,
+     discover: str = "both",
+     child_ids: str | None = None,
++    parent_epic_worktree: str | None = None,
++    parent_epic_branch: str | None = None,
++    parent_epic_id: str | None = None,
++    merge_target_branch: str = "main",
+ ) -> dict[str, Any]:
+     """Fan out an epic's open children as concurrent software_dev_full runs.
+ 
+@@ -146,5 +150,11 @@ def epic_run(
+         dry_run=dry_run,
+         max_issues=max_issues,
+         logger=logger,
++        extra_formula_kwargs={
++            "parent_epic_worktree": parent_epic_worktree,
++            "parent_epic_branch": parent_epic_branch,
++            "parent_epic_id": parent_epic_id or epic_id,
++            "parent_epic_merge_target": merge_target_branch,
++        },
+     )
+     return {"epic_id": epic_id, **out}
+diff --git a/wts/po_formulas_wts/epic_finalize.py b/wts/po_formulas_wts/epic_finalize.py
+index 008f367..f8fa65f 100644
+--- a/wts/po_formulas_wts/epic_finalize.py
++++ b/wts/po_formulas_wts/epic_finalize.py
+@@ -37,6 +37,7 @@ from prefect_orchestration.beads_meta import close_issue, list_epic_children
+ from prefect_orchestration.parsing import read_verdict
+ 
+ from po_formulas_wts.software_dev import _agent_dir, _agent_step_task, _task_md
++from po_formulas_wts.worktree import merge_worktree
+ 
+ # Default rig-relative path to the smoke walkthrough script. Override via
+ # the `walkthrough_script` param to epic_finalize. Repos that don't ship a
+@@ -67,6 +68,27 @@ def _stamp_metadata(epic_id: str, key: str, value: str, rig_path: Path) -> None:
+         pass
+ 
+ 
++def _bd_metadata(bead_id: str, rig_path: Path) -> dict[str, Any]:
++    proc = subprocess.run(
++        ["bd", "show", bead_id, "--json"],
++        cwd=str(rig_path),
++        capture_output=True,
++        text=True,
++        check=False,
++    )
++    if proc.returncode != 0 or not proc.stdout.strip():
++        return {}
++    try:
++        data = json.loads(proc.stdout)
++    except json.JSONDecodeError:
++        return {}
++    row = data[0] if isinstance(data, list) and data else data
++    if not isinstance(row, dict):
++        return {}
++    metadata = row.get("metadata") or {}
++    return metadata if isinstance(metadata, dict) else {}
++
++
+ def _smoke_has_ui_evidence(smoke_out_dir: Path) -> bool:
+     """Heuristic: the smoke walkthrough produced UI screenshots iff its
+     `evidence/` dir contains any `.png`. Backend-only smokes (curl loops,
+@@ -280,6 +302,9 @@ def epic_finalize(
+     ci_timeout_s: int = DEFAULT_CI_TIMEOUT_S,
+     dry_run: bool = False,
+     claim: bool = True,
++    worktree_path: str | None = None,
++    branch: str | None = None,
++    merge_target_branch: str = "main",
+ ) -> dict[str, Any]:
+     """End-of-epic batch verification formula.
+ 
+@@ -316,6 +341,18 @@ def epic_finalize(
+     rig_path_p = Path(rig_path).expanduser().resolve()
+     run_dir = rig_path_p / ".planning" / "epics" / epic_id
+     run_dir.mkdir(parents=True, exist_ok=True)
++    metadata = _bd_metadata(epic_id, rig_path_p)
++    worktree_path = worktree_path or str(metadata.get("work_dir") or "")
++    repo_path = (
++        Path(worktree_path).expanduser().resolve()
++        if worktree_path
++        else rig_path_p
++    )
++    branch_name = branch or str(metadata.get("branch") or "") or _current_branch(repo_path)
++    merge_target = (
++        str(metadata.get("merge_target_branch") or "").strip()
++        or merge_target_branch
++    )
+ 
+     # 1. Defensive check — all children should be closed by bead-dep blocking,
+     #    but log if something slipped through.
+@@ -340,11 +377,11 @@ def epic_finalize(
+             logger.warning("spec-audit: spec_path=%s not found", resolved_spec)
+             resolved_spec = None
+     else:
+-        resolved_spec = _discover_spec_path(rig_path_p)
++        resolved_spec = _discover_spec_path(repo_path)
+         if resolved_spec is None:
+             logger.info(
+                 "spec-audit: no spec.md found at %s — skipping",
+-                rig_path_p.parent / "spec.md",
++                repo_path.parent / "spec.md",
+             )
+ 
+     if resolved_spec is not None and not dry_run:
+@@ -353,14 +390,14 @@ def epic_finalize(
+             agent_dir=_agent_dir("spec-auditor"),
+             task=_task_md("spec-auditor"),
+             seed_id=epic_id,
+-            rig_path=str(rig_path_p),
++            rig_path=str(repo_path),
+             run_dir=run_dir,
+             step="spec-audit",
+             iter_n=1,
+             ctx={
+                 "epic_id": epic_id,
+                 "spec_path": str(resolved_spec),
+-                "rig_path": str(rig_path_p),
++                "rig_path": str(repo_path),
+                 "run_dir": str(run_dir),
+             },
+             dry_run=False,
+@@ -388,14 +425,14 @@ def epic_finalize(
+     # 3. Full test suite.
+     if not dry_run:
+         for target in ("test-unit", "test-e2e"):
+-            rc, out = _run_make(target, rig_path_p)
++            rc, out = _run_make(target, repo_path)
+             logger.info("make %s: rc=%d\n%s", target, rc, out[:2000])
+             if rc != 0:
+                 failures.append(f"make {target} failed (rc={rc})")
+ 
+     # 3. Lint.
+     if not dry_run:
+-        rc, out = _run_make("lint", rig_path_p)
++        rc, out = _run_make("lint", repo_path)
+         logger.info("make lint: rc=%d\n%s", rc, out[:2000])
+         if rc != 0:
+             failures.append(f"make lint failed (rc={rc})")
+@@ -404,7 +441,7 @@ def epic_finalize(
+     smoke_result: dict[str, Any] = {"verdict": "SKIPPED"}
+     if not skip_walkthrough and walkthrough_script != "" and not dry_run:
+         smoke_result = _run_smoke_walkthrough(
+-            rig_path_p,
++            repo_path,
+             walkthrough_script or DEFAULT_WALKTHROUGH_SCRIPT,
+             run_dir,
+         )
+@@ -438,7 +475,7 @@ def epic_finalize(
+                 agent_dir=_agent_dir("demo-video"),
+                 task=_task_md("demo-video"),
+                 seed_id=epic_id,
+-                rig_path=str(rig_path_p),
++                rig_path=str(repo_path),
+                 run_dir=run_dir,
+                 step="demo-video",
+                 iter_n=1,
+@@ -446,7 +483,7 @@ def epic_finalize(
+                     "epic_id": epic_id,
+                     "smoke_out_dir": str(smoke_out_dir),
+                     "smoke_report": smoke_result.get("report_path"),
+-                    "rig_path": str(rig_path_p),
++                    "rig_path": str(repo_path),
+                     "run_dir": str(run_dir),
+                 },
+                 dry_run=False,
+@@ -454,10 +491,10 @@ def epic_finalize(
+             # Discover the produced mp4: agent writes to
+             # research/<branch-slug>/demo-<utc>/demo_final.mp4 per the
+             # demo-video skill convention.
+-            branch = _current_branch(rig_path_p) or "unknown-branch"
+-            branch_slug = branch.replace("/", "-")
++            demo_branch = branch_name or _current_branch(repo_path) or "unknown-branch"
++            branch_slug = demo_branch.replace("/", "-")
+             candidates = sorted(
+-                (rig_path_p / "research" / branch_slug).glob("demo-*/demo_final.mp4"),
++                (repo_path / "research" / branch_slug).glob("demo-*/demo_final.mp4"),
+                 key=lambda p: p.stat().st_mtime,
+                 reverse=True,
+             )
+@@ -475,7 +512,7 @@ def epic_finalize(
+     # 5b. Optional legacy smoke command (free-form shell blob).
+     if smoke_cmd and not dry_run:
+         result = subprocess.run(
+-            smoke_cmd, shell=True, cwd=str(rig_path_p), capture_output=True, text=True
++            smoke_cmd, shell=True, cwd=str(repo_path), capture_output=True, text=True
+         )
+         logger.info("smoke_cmd rc=%d\n%s", result.returncode, result.stdout[:2000])
+         if result.returncode != 0:
+@@ -486,9 +523,8 @@ def epic_finalize(
+     #     work we already know is broken).
+     ci_result: dict[str, Any] = {"verdict": "skipped", "summary": "not run"}
+     if not skip_remote_ci and not failures and not dry_run:
+-        branch = _current_branch(rig_path_p)
+-        if branch:
+-            ci_result = _run_remote_ci_gate(rig_path_p, branch, ci_timeout_s)
++        if branch_name:
++            ci_result = _run_remote_ci_gate(repo_path, branch_name, ci_timeout_s)
+             logger.info(
+                 "remote-ci: pr=%s verdict=%s %s",
+                 ci_result.get("pr"),
+@@ -523,7 +559,7 @@ def epic_finalize(
+             agent_dir=_agent_dir("documenter"),
+             task=_task_md("documenter"),
+             seed_id=epic_id,
+-            rig_path=str(rig_path_p),
++            rig_path=str(repo_path),
+             run_dir=run_dir,
+             step="docs",
+             iter_n=1,
+@@ -568,6 +604,17 @@ def epic_finalize(
+     post_flight.write_text("\n".join(lines) + "\n")
+     logger.info("post-flight artifact: %s", post_flight)
+ 
++    merged_into: str | None = None
++    if not failures and not dry_run and worktree_path:
++        merged_into = merge_worktree(
++            rig_path_p,
++            epic_id,
++            target_branch=merge_target,
++            cleanup=True,
++            for_epic=True,
++        )
++        logger.info("epic-finalize: merged %s into %s", branch_name, merged_into)
++
+     # 7. Close epic if all passed.
+     if not failures and not dry_run:
+         close_issue(
+@@ -591,4 +638,8 @@ def epic_finalize(
+         "smoke": smoke_result,
+         "demo_video_path": demo_video_path,
+         "ci": ci_result,
++        "merged_into": merged_into,
++        "worktree_path": str(repo_path),
++        "branch": branch_name,
++        "merge_target_branch": merge_target,
+     }
+diff --git a/wts/po_formulas_wts/epic_wts.py b/wts/po_formulas_wts/epic_wts.py
+index 7e282f1..6596e77 100644
+--- a/wts/po_formulas_wts/epic_wts.py
++++ b/wts/po_formulas_wts/epic_wts.py
+@@ -29,6 +29,7 @@ Filed under: prefect-orchestration-54n.
+ 
+ from __future__ import annotations
+ 
++import subprocess
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -38,6 +39,18 @@ from po_formulas_wts.epic import epic_run
+ from po_formulas_wts.epic_finalize import epic_finalize
+ from po_formulas_wts.pre_pr_review import pre_pr_review
+ from po_formulas_wts.pr_writer import pr_writer
++from po_formulas_wts.worktree import WorktreePaths, setup_worktree
++
++
++def _stamp_metadata(epic_id: str, rig_path: Path, values: dict[str, str]) -> None:
++    for key, value in values.items():
++        subprocess.run(
++            ["bd", "update", epic_id, "--set-metadata", f"{key}={value}"],
++            cwd=str(rig_path),
++            capture_output=True,
++            text=True,
++            check=False,
++        )
+ 
+ 
+ @flow(name="epic_wts", flow_run_name="{epic_id}", log_prints=True)
+@@ -79,6 +92,24 @@ def epic_wts(
+     logger = get_run_logger()
+     rig_path_p = Path(rig_path).expanduser().resolve()
+     out: dict[str, Any] = {"epic_id": epic_id, "verdict": "unknown"}
++    paths = WorktreePaths.for_epic(rig_path_p, epic_id)
++
++    logger.info("epic_wts: preparing shared worktree %s", paths.worktree)
++    shared_worktree = setup_worktree(rig_path_p, epic_id, for_epic=True)
++    _stamp_metadata(
++        epic_id,
++        rig_path_p,
++        {
++            "work_dir": str(shared_worktree),
++            "branch": paths.branch,
++            "merge_target_branch": merge_target_branch,
++        },
++    )
++    out["worktree"] = {
++        "path": str(shared_worktree),
++        "branch": paths.branch,
++        "merge_target_branch": merge_target_branch,
++    }
+ 
+     # 1. Fan-out.
+     logger.info("epic_wts: dispatching children via epic_run")
+@@ -90,6 +121,10 @@ def epic_wts(
+         max_issues=max_issues,
+         discover=discover,
+         child_ids=child_ids,
++        parent_epic_worktree=str(shared_worktree),
++        parent_epic_branch=paths.branch,
++        parent_epic_id=epic_id,
++        merge_target_branch=merge_target_branch,
+     )
+     out["epic_run"] = epic_out
+     epic_failed = bool(epic_out.get("failed_ids") or epic_out.get("errors"))
+@@ -128,6 +163,9 @@ def epic_wts(
+         "skip_demo_video": skip_demo_video,
+         "skip_remote_ci": skip_remote_ci,
+         "dry_run": dry_run,
++        "worktree_path": str(shared_worktree),
++        "branch": paths.branch,
++        "merge_target_branch": merge_target_branch,
+     }
+     if ci_timeout_s is not None:
+         finalize_kwargs["ci_timeout_s"] = ci_timeout_s
+@@ -152,6 +190,8 @@ def epic_wts(
+             epic_id=epic_id,
+             rig=rig,
+             rig_path=str(rig_path_p),
++            branch=paths.branch,
++            merge_target=merge_target_branch,
+             dry_run=dry_run,
+         )
+         out["pr_writer"] = pr_out
+diff --git a/wts/po_formulas_wts/graph.py b/wts/po_formulas_wts/graph.py
+index c6160dd..7837980 100644
+--- a/wts/po_formulas_wts/graph.py
++++ b/wts/po_formulas_wts/graph.py
+@@ -138,6 +138,7 @@ def _dispatch_nodes(
+     dry_run: bool,
+     max_issues: int | None,
+     logger: Any,
++    extra_formula_kwargs: dict[str, Any] | None = None,
+ ) -> dict[str, Any]:
+     """Topo-sort `nodes` by their blocks-subgraph and submit one task per node.
+ 
+@@ -219,11 +220,15 @@ def _dispatch_nodes(
+         except (TypeError, ValueError):
+             accepted = set(_REQUIRED_FORMULA_PARAMS) | {"parent_bead", "dry_run"}
+         base_caps = {k: v for k, v in iter_caps.items() if k in accepted}
++        extra_caps = {
++            k: v for k, v in (extra_formula_kwargs or {}).items() if k in accepted
++        }
+         kwargs: dict[str, Any] = {
+             "issue_id": node["id"],
+             "rig": rig,
+             "rig_path": rig_path,
+             **base_caps,
++            **extra_caps,
+         }
+         if "parent_bead" in accepted and parent_bead is not None:
+             kwargs["parent_bead"] = parent_bead
+diff --git a/wts/po_formulas_wts/software_dev.py b/wts/po_formulas_wts/software_dev.py
+index 8e94f32..dfccff5 100644
+--- a/wts/po_formulas_wts/software_dev.py
++++ b/wts/po_formulas_wts/software_dev.py
+@@ -290,6 +290,78 @@ def _write_scoped_tests_artifact(
+         return []
+ 
+ 
++def _bd_metadata(bead_id: str, rig_path: Path) -> dict[str, Any]:
++    proc = subprocess.run(
++        ["bd", "show", bead_id, "--json"],
++        cwd=str(rig_path),
++        capture_output=True,
++        text=True,
++        timeout=10,
++        check=False,
++    )
++    if proc.returncode != 0 or not proc.stdout.strip():
++        return {}
++    try:
++        data = json.loads(proc.stdout)
++    except json.JSONDecodeError:
++        return {}
++    row = data[0] if isinstance(data, list) and data else data
++    if not isinstance(row, dict):
++        return {}
++    metadata = row.get("metadata") or {}
++    return metadata if isinstance(metadata, dict) else {}
++
++
++def _stamp_metadata(bead_id: str, rig_path: Path, values: dict[str, str]) -> None:
++    for key, value in values.items():
++        subprocess.run(
++            ["bd", "update", bead_id, "--set-metadata", f"{key}={value}"],
++            cwd=str(rig_path),
++            capture_output=True,
++            text=True,
++            check=False,
++        )
++
++
++def _resolve_epic_worktree_context(
++    issue_id: str,
++    main_rig_path: Path,
++    *,
++    parent_epic_worktree: str | None,
++    parent_epic_branch: str | None,
++    parent_epic_id: str | None,
++    parent_epic_merge_target: str | None,
++) -> dict[str, str] | None:
++    if parent_epic_worktree:
++        work_dir = Path(parent_epic_worktree).expanduser().resolve()
++        if not work_dir.exists():
++            raise RuntimeError(f"parent epic worktree does not exist: {work_dir}")
++        return {
++            "work_dir": str(work_dir),
++            "branch": parent_epic_branch or "",
++            "epic_id": parent_epic_id or "",
++            "merge_target_branch": parent_epic_merge_target or "main",
++        }
++
++    metadata = _bd_metadata(issue_id, main_rig_path)
++    work_dir_raw = str(metadata.get("work_dir") or "").strip()
++    branch = str(metadata.get("branch") or "").strip()
++    epic_id = str(metadata.get("epic_id") or "").strip()
++    if not (work_dir_raw and branch and epic_id):
++        return None
++    work_dir = Path(work_dir_raw).expanduser().resolve()
++    if not work_dir.exists():
++        return None
++    return {
++        "work_dir": str(work_dir),
++        "branch": branch,
++        "epic_id": epic_id,
++        "merge_target_branch": str(
++            metadata.get("merge_target_branch") or parent_epic_merge_target or "main"
++        ),
++    }
++
++
+ def _compute_work_landed(run_dir: Path) -> bool:
+     """True iff at least one builder iteration produced a non-empty diff.
+ 
+@@ -441,6 +513,10 @@ def software_dev_full(
+     enable_ralph: bool = False,
+     enable_full_test_gate: bool = False,
+     use_worktree: bool = True,
++    parent_epic_worktree: str | None = None,
++    parent_epic_branch: str | None = None,
++    parent_epic_id: str | None = None,
++    parent_epic_merge_target: str | None = None,
+ ) -> dict[str, Any]:
+     """Plain-Python software_dev_full body. Each role = one `agent_step` call.
+ 
+@@ -459,6 +535,14 @@ def software_dev_full(
+     """
+     logger = get_run_logger()
+     main_rig_path_p = Path(rig_path).expanduser().resolve()
++    epic_worktree_context = _resolve_epic_worktree_context(
++        issue_id,
++        main_rig_path_p,
++        parent_epic_worktree=parent_epic_worktree,
++        parent_epic_branch=parent_epic_branch,
++        parent_epic_id=parent_epic_id,
++        parent_epic_merge_target=parent_epic_merge_target,
++    )
+ 
+     # Worktree isolation. When enabled (default), each bead runs in its
+     # own git worktree at `<rig>.wt-<id>/` on branch `wts-<id>`.
+@@ -467,7 +551,16 @@ def software_dev_full(
+     # Disable via use_worktree=False or env PO_WTS_NO_WORKTREE=1.
+     rig_path_p = main_rig_path_p
+     worktree_enabled = False
+-    if use_worktree and not os.environ.get("PO_WTS_NO_WORKTREE"):
++    epic_managed_worktree = False
++    if epic_worktree_context is not None:
++        rig_path_p = Path(epic_worktree_context["work_dir"]).expanduser().resolve()
++        epic_managed_worktree = True
++        logger.info(
++            "worktree: using parent epic worktree %s on branch %s",
++            rig_path_p,
++            epic_worktree_context.get("branch") or "(unknown)",
++        )
++    elif use_worktree and not os.environ.get("PO_WTS_NO_WORKTREE"):
+         try:
+             from po_formulas_wts.worktree import _is_git_repo, setup_worktree
+             if _is_git_repo(main_rig_path_p):
+@@ -505,6 +598,20 @@ def software_dev_full(
+         # 0. Claim the seed (in_progress + assignee).
+         if claim and not dry_run:
+             claim_issue(issue_id, assignee=f"po-{os.getpid()}", rig_path=rig_path_p)
++            if epic_worktree_context is not None:
++                _stamp_metadata(
++                    issue_id,
++                    main_rig_path_p,
++                    {
++                        "work_dir": epic_worktree_context["work_dir"],
++                        "branch": epic_worktree_context.get("branch") or "",
++                        "merge_target_branch": epic_worktree_context.get(
++                            "merge_target_branch"
++                        )
++                        or "main",
++                        "epic_id": epic_worktree_context.get("epic_id") or "",
++                    },
++                )
+ 
+         # 1. Triage — agent reads the user's issue (the seed bead's
+         #    description), classifies, writes triage.json verdict file.
+@@ -967,6 +1074,7 @@ def software_dev_full(
+             "is_docs_only": is_docs_only,
+             "has_ui": has_ui,
+             "worktree_merged_into": merged_into,
++            "epic_managed_worktree": epic_managed_worktree,
+         }
+     except BaseException as exc:
+         _record_flow_outcome(run_dir, exc, issue_id, str(main_rig_path_p))
+diff --git a/wts/po_formulas_wts/worktree.py b/wts/po_formulas_wts/worktree.py
+index 6bc8b29..629f92b 100644
+--- a/wts/po_formulas_wts/worktree.py
++++ b/wts/po_formulas_wts/worktree.py
+@@ -66,8 +66,16 @@ class WorktreePaths:
+ 
+     @classmethod
+     def for_issue(cls, rig_path: Path | str, issue_id: str) -> "WorktreePaths":
++        return cls._for_id(rig_path, issue_id)
++
++    @classmethod
++    def for_epic(cls, rig_path: Path | str, epic_id: str) -> "WorktreePaths":
++        return cls._for_id(rig_path, epic_id)
++
++    @classmethod
++    def _for_id(cls, rig_path: Path | str, raw_id: str) -> "WorktreePaths":
+         main = Path(rig_path).expanduser().resolve()
+-        slug = sanitize(issue_id)
++        slug = sanitize(raw_id)
+         return cls(
+             main_rig=main,
+             worktree=main.parent / f"{main.name}.wt-{slug}",
+@@ -75,6 +83,17 @@ class WorktreePaths:
+         )
+ 
+ 
++def _paths_for(
++    rig_path: Path | str,
++    issue_id: str,
++    *,
++    for_epic: bool = False,
++) -> WorktreePaths:
++    if for_epic:
++        return WorktreePaths.for_epic(rig_path, issue_id)
++    return WorktreePaths.for_issue(rig_path, issue_id)
++
++
+ # ─── Operations ───
+ 
+ 
+@@ -160,13 +179,14 @@ def setup_worktree(
+     issue_id: str,
+     *,
+     shared_dirs: tuple[str, ...] = (".beads", ".planning"),
++    for_epic: bool = False,
+ ) -> Path:
+     """Create (or refresh) a worktree for this bead. Returns the worktree path.
+ 
+     Idempotent: if the worktree already exists at the expected path,
+     refreshes the symlinks and returns it.
+     """
+-    paths = WorktreePaths.for_issue(rig_path, issue_id)
++    paths = _paths_for(rig_path, issue_id, for_epic=for_epic)
+ 
+     if not _is_git_repo(paths.main_rig):
+         raise RuntimeError(
+@@ -209,11 +229,12 @@ def commit_pending(
+     issue_id: str,
+     *,
+     message: str | None = None,
++    for_epic: bool = False,
+ ) -> bool:
+     """Stage + commit anything dirty in the worktree. Returns True if a
+     commit was created. Safe to call when the tree is already clean
+     (returns False)."""
+-    paths = WorktreePaths.for_issue(rig_path, issue_id)
++    paths = _paths_for(rig_path, issue_id, for_epic=for_epic)
+     if not paths.worktree.exists():
+         return False
+     if not _has_pending_changes(paths.worktree):
+@@ -236,6 +257,7 @@ def merge_worktree(
+     *,
+     target_branch: str | None = None,
+     cleanup: bool = True,
++    for_epic: bool = False,
+ ) -> str:
+     """Merge the bead's worktree branch back into the main rig's current
+     branch (or `target_branch` if explicitly named), then optionally
+@@ -245,12 +267,17 @@ def merge_worktree(
+     caller decides whether to leave the worktree for resolution (set
+     `cleanup=False`).
+     """
+-    paths = WorktreePaths.for_issue(rig_path, issue_id)
++    paths = _paths_for(rig_path, issue_id, for_epic=for_epic)
+     if not paths.worktree.exists():
+         logger.warning("worktree: %s missing; nothing to merge", paths.worktree)
+         return target_branch or _current_branch(paths.main_rig)
+ 
+-    commit_pending(rig_path, issue_id, message=f"[{issue_id}] pre-merge snapshot")
++    commit_pending(
++        rig_path,
++        issue_id,
++        message=f"[{issue_id}] pre-merge snapshot",
++        for_epic=for_epic,
++    )
+ 
+     target = target_branch or _current_branch(paths.main_rig)
+     # Main rig may already be on `target` — `checkout` is still safe and
+@@ -260,7 +287,13 @@ def merge_worktree(
+     logger.info("worktree: merged %s into %s", paths.branch, target)
+ 
+     if cleanup:
+-        cleanup_worktree(rig_path, issue_id, force=True, delete_branch=False)
++        cleanup_worktree(
++            rig_path,
++            issue_id,
++            force=True,
++            delete_branch=False,
++            for_epic=for_epic,
++        )
+     return target
+ 
+ 
+@@ -270,13 +303,14 @@ def cleanup_worktree(
+     *,
+     force: bool = False,
+     delete_branch: bool = False,
++    for_epic: bool = False,
+ ) -> None:
+     """Remove the worktree directory + (optionally) its branch.
+ 
+     `force=True` reclaims a worktree that was left in a dirty state
+     by a crash. `delete_branch=True` also drops the per-bead branch
+     (useful after a successful merge; not after a failure)."""
+-    paths = WorktreePaths.for_issue(rig_path, issue_id)
++    paths = _paths_for(rig_path, issue_id, for_epic=for_epic)
+ 
+     if paths.worktree.exists():
+         args = ["git", "worktree", "remove"]
+diff --git a/wts/tests/test_epic_wts.py b/wts/tests/test_epic_wts.py
+new file mode 100644
+index 0000000..e428f31
+--- /dev/null
++++ b/wts/tests/test_epic_wts.py
+@@ -0,0 +1,221 @@
++from __future__ import annotations
++
++import logging
++from pathlib import Path
++from types import SimpleNamespace
++from typing import Any
++
++import pytest
++
++import po_formulas_wts.epic_wts as epic_wts_mod
++import po_formulas_wts.epic_finalize as finalize_mod
++import po_formulas_wts.graph as graph_mod
++
++
++class _Future:
++    def __init__(self, value: dict[str, Any]) -> None:
++        self.value = value
++
++    def result(self, raise_on_failure: bool = False) -> dict[str, Any]:
++        return self.value
++
++
++class _RunNodeTask:
++    def __init__(self) -> None:
++        self.calls: list[dict[str, Any]] = []
++
++    def submit(self, formula_callable: Any, **kwargs: Any) -> _Future:
++        call_kwargs = dict(kwargs)
++        call_kwargs.pop("wait_for", None)
++        self.calls.append(call_kwargs)
++        return _Future(formula_callable(**call_kwargs))
++
++
++def test_dispatch_nodes_filters_extra_formula_kwargs(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    runner = _RunNodeTask()
++    monkeypatch.setattr(graph_mod, "_run_node_task", runner)
++    monkeypatch.setattr(
++        graph_mod,
++        "topo_sort_blocks",
++        lambda nodes: nodes,
++    )
++    monkeypatch.setattr(
++        graph_mod,
++        "_resolve_per_bead_formula",
++        lambda _node, default_callable, **_kw: default_callable,
++    )
++
++    def formula(
++        issue_id: str,
++        rig: str,
++        rig_path: str,
++        parent_epic_worktree: str | None = None,
++    ) -> dict[str, Any]:
++        return {
++            "issue_id": issue_id,
++            "worktree": parent_epic_worktree,
++            "rig": rig,
++            "rig_path": rig_path,
++        }
++
++    out = graph_mod._dispatch_nodes(
++        nodes=[{"id": "child-1", "block_deps": []}],
++        rig="rig",
++        rig_path="/tmp/rig",
++        formula_callable=formula,
++        parent_bead="epic",
++        iter_caps={},
++        dry_run=False,
++        max_issues=None,
++        logger=SimpleNamespace(info=lambda *_a, **_kw: None),
++        extra_formula_kwargs={
++            "parent_epic_worktree": "/tmp/rig.wt-epic",
++            "not_accepted": "ignored",
++        },
++    )
++
++    assert out["results"]["child-1"]["worktree"] == "/tmp/rig.wt-epic"
++    assert "not_accepted" not in runner.calls[0]
++
++
++def test_epic_wts_sets_up_one_shared_worktree(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    rig = tmp_path / "rig"
++    rig.mkdir()
++    shared = tmp_path / "rig.wt-epic"
++    shared.mkdir()
++    setup_calls: list[tuple[Path, str, bool]] = []
++    metadata: dict[str, str] = {}
++    epic_run_kwargs: dict[str, Any] = {}
++    finalize_kwargs: dict[str, Any] = {}
++
++    def fake_setup(rig_path: Path, epic_id: str, *, for_epic: bool = False) -> Path:
++        setup_calls.append((Path(rig_path), epic_id, for_epic))
++        return shared
++
++    def fake_epic_run(**kwargs: Any) -> dict[str, Any]:
++        epic_run_kwargs.update(kwargs)
++        return {"status": "ok", "results": {"child-1": {"status": "completed"}}}
++
++    def fake_finalize(**kwargs: Any) -> dict[str, Any]:
++        finalize_kwargs.update(kwargs)
++        return {"status": "PASSED", "failures": []}
++
++    monkeypatch.setattr(epic_wts_mod, "setup_worktree", fake_setup)
++    monkeypatch.setattr(
++        epic_wts_mod,
++        "get_run_logger",
++        lambda: logging.getLogger(__name__),
++    )
++    monkeypatch.setattr(epic_wts_mod, "epic_run", fake_epic_run)
++    monkeypatch.setattr(
++        epic_wts_mod,
++        "pre_pr_review",
++        lambda **_kwargs: {"validation": "passed", "bead_ids": []},
++    )
++    monkeypatch.setattr(epic_wts_mod, "epic_finalize", fake_finalize)
++    monkeypatch.setattr(
++        epic_wts_mod,
++        "pr_writer",
++        lambda **_kwargs: {"verdict": "PASS", "branch": _kwargs.get("branch")},
++    )
++    monkeypatch.setattr(
++        epic_wts_mod,
++        "_stamp_metadata",
++        lambda _epic_id, _rig_path, values: metadata.update(values),
++    )
++
++    out = epic_wts_mod.epic_wts.fn(
++        epic_id="epic",
++        rig="rig",
++        rig_path=str(rig),
++        skip_remote_ci=True,
++    )
++
++    assert out["verdict"] == "passed"
++    assert setup_calls == [(rig.resolve(), "epic", True)]
++    assert metadata["work_dir"] == str(shared)
++    assert metadata["branch"] == "wts-epic"
++    assert epic_run_kwargs["parent_epic_worktree"] == str(shared)
++    assert epic_run_kwargs["parent_epic_branch"] == "wts-epic"
++    assert finalize_kwargs["worktree_path"] == str(shared)
++    assert finalize_kwargs["branch"] == "wts-epic"
++
++
++def test_parallel_epics_isolated(tmp_path: Path) -> None:
++    rig = tmp_path / "rig"
++    rig.mkdir()
++    first = epic_wts_mod.WorktreePaths.for_epic(rig, "epic.one")
++    second = epic_wts_mod.WorktreePaths.for_epic(rig, "epic.two")
++
++    assert first.worktree != second.worktree
++    assert first.branch != second.branch
++    assert first.worktree.name == "rig.wt-epic_one"
++    assert second.worktree.name == "rig.wt-epic_two"
++
++
++def test_epic_finalize_merges_shared_worktree(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    rig = tmp_path / "rig"
++    rig.mkdir()
++    shared = tmp_path / "rig.wt-epic"
++    shared.mkdir()
++    merge_calls: list[dict[str, Any]] = []
++    closed: list[str] = []
++
++    monkeypatch.setattr(finalize_mod, "list_epic_children", lambda *_a, **_kw: [])
++    monkeypatch.setattr(
++        finalize_mod,
++        "get_run_logger",
++        lambda: logging.getLogger(__name__),
++    )
++    monkeypatch.setattr(finalize_mod, "_run_make", lambda *_a, **_kw: (0, "ok"))
++    monkeypatch.setattr(
++        finalize_mod,
++        "_agent_step_task",
++        lambda **_kwargs: SimpleNamespace(verdict="approved", summary=""),
++    )
++    monkeypatch.setattr(
++        finalize_mod,
++        "merge_worktree",
++        lambda *args, **kwargs: merge_calls.append(
++            {"args": args, "kwargs": kwargs}
++        )
++        or "main",
++    )
++    monkeypatch.setattr(
++        finalize_mod,
++        "close_issue",
++        lambda epic_id, **_kwargs: closed.append(epic_id),
++    )
++
++    out = finalize_mod.epic_finalize.fn(
++        epic_id="epic",
++        rig="rig",
++        rig_path=str(rig),
++        spec_path="",
++        skip_walkthrough=True,
++        skip_demo_video=True,
++        skip_remote_ci=True,
++        worktree_path=str(shared),
++        branch="wts-epic",
++        merge_target_branch="main",
++    )
++
++    assert out["status"] == "PASSED"
++    assert out["merged_into"] == "main"
++    assert closed == ["epic"]
++    assert merge_calls == [
++        {
++            "args": (rig.resolve(), "epic"),
++            "kwargs": {
++                "target_branch": "main",
++                "cleanup": True,
++                "for_epic": True,
++            },
++        }
++    ]
+diff --git a/wts/tests/test_software_dev_worktree.py b/wts/tests/test_software_dev_worktree.py
+new file mode 100644
+index 0000000..d3cbbfb
+--- /dev/null
++++ b/wts/tests/test_software_dev_worktree.py
+@@ -0,0 +1,139 @@
++from __future__ import annotations
++
++from pathlib import Path
++from types import SimpleNamespace
++import logging
++
++import pytest
++
++import po_formulas_wts.software_dev as sd_mod
++import po_formulas_wts.worktree as wt_mod
++
++
++def _fake_agent_step(**_kwargs: object) -> SimpleNamespace:
++    return SimpleNamespace(verdict="approved", summary="", bead_id="step")
++
++
++def test_shared_epic_context_skips_child_worktree(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    main = tmp_path / "rig"
++    main.mkdir()
++    shared = tmp_path / "rig.wt-epic"
++    shared.mkdir()
++    calls: list[tuple[str, str]] = []
++
++    monkeypatch.setattr(sd_mod, "_agent_step_task", _fake_agent_step)
++    monkeypatch.setattr(sd_mod, "get_run_logger", lambda: logging.getLogger(__name__))
++    monkeypatch.setattr(
++        sd_mod,
++        "_read_triage_flags",
++        lambda _rig_path, _seed_id: {"complexity": "simple"},
++    )
++    monkeypatch.setattr(wt_mod, "_is_git_repo", lambda _path: True)
++    monkeypatch.setattr(
++        wt_mod,
++        "setup_worktree",
++        lambda _path, issue_id, **_kw: calls.append(("setup", issue_id)) or shared,
++    )
++    monkeypatch.setattr(
++        wt_mod,
++        "merge_worktree",
++        lambda _path, issue_id, **_kw: calls.append(("merge", issue_id)) or "main",
++    )
++    monkeypatch.setattr(sd_mod, "_stamp_metadata", lambda *_args, **_kw: None)
++    monkeypatch.setattr(sd_mod, "_bd_metadata", lambda *_args, **_kw: {})
++
++    out = sd_mod.software_dev_full.fn(
++        issue_id="child-1",
++        rig="rig",
++        rig_path=str(main),
++        claim=False,
++        dry_run=True,
++        parent_epic_worktree=str(shared),
++        parent_epic_branch="wts-epic",
++        parent_epic_id="epic",
++        parent_epic_merge_target="main",
++    )
++
++    assert out["status"] == "completed"
++    assert out["epic_managed_worktree"] is True
++    assert calls == []
++
++
++def test_retry_uses_existing_worktree_metadata(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    main = tmp_path / "rig"
++    main.mkdir()
++    shared = tmp_path / "rig.wt-epic"
++    shared.mkdir()
++
++    monkeypatch.setattr(
++        sd_mod,
++        "_bd_metadata",
++        lambda *_args, **_kw: {
++            "work_dir": str(shared),
++            "branch": "wts-epic",
++            "merge_target_branch": "main",
++            "epic_id": "epic",
++        },
++    )
++
++    ctx = sd_mod._resolve_epic_worktree_context(
++        "child-1",
++        main,
++        parent_epic_worktree=None,
++        parent_epic_branch=None,
++        parent_epic_id=None,
++        parent_epic_merge_target=None,
++    )
++
++    assert ctx == {
++        "work_dir": str(shared.resolve()),
++        "branch": "wts-epic",
++        "merge_target_branch": "main",
++        "epic_id": "epic",
++    }
++
++
++def test_standalone_full_wts_still_creates_worktree(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    main = tmp_path / "rig"
++    main.mkdir()
++    child_wt = tmp_path / "rig.wt-child"
++    child_wt.mkdir()
++    calls: list[tuple[str, str]] = []
++
++    monkeypatch.setattr(sd_mod, "_agent_step_task", _fake_agent_step)
++    monkeypatch.setattr(sd_mod, "get_run_logger", lambda: logging.getLogger(__name__))
++    monkeypatch.setattr(
++        sd_mod,
++        "_read_triage_flags",
++        lambda _rig_path, _seed_id: {"complexity": "simple"},
++    )
++    monkeypatch.setattr(sd_mod, "_bd_metadata", lambda *_args, **_kw: {})
++    monkeypatch.setattr(wt_mod, "_is_git_repo", lambda _path: True)
++    monkeypatch.setattr(
++        wt_mod,
++        "setup_worktree",
++        lambda _path, issue_id, **_kw: calls.append(("setup", issue_id)) or child_wt,
++    )
++    monkeypatch.setattr(
++        wt_mod,
++        "merge_worktree",
++        lambda _path, issue_id, **_kw: calls.append(("merge", issue_id)) or "main",
++    )
++
++    out = sd_mod.software_dev_full.fn(
++        issue_id="child-1",
++        rig="rig",
++        rig_path=str(main),
++        claim=False,
++        dry_run=True,
++    )
++
++    assert out["status"] == "completed"
++    assert out["epic_managed_worktree"] is False
++    assert calls == [("setup", "child-1"), ("merge", "child-1")]
+diff --git a/wts/tests/test_worktree.py b/wts/tests/test_worktree.py
+index c399258..fde681c 100644
+--- a/wts/tests/test_worktree.py
++++ b/wts/tests/test_worktree.py
+@@ -85,6 +85,12 @@ def test_worktree_paths_for_issue(tmp_path: Path):
+     assert paths.branch == "wts-x_1_2"
+ 
+ 
++def test_worktree_paths_for_epic_reuses_issue_naming(tmp_path: Path):
++    issue_paths = WorktreePaths.for_issue(tmp_path / "myrig", "epic.1")
++    epic_paths = WorktreePaths.for_epic(tmp_path / "myrig", "epic.1")
++    assert epic_paths == issue_paths
++
++
+ # ─── _is_git_repo ───
+ 
+ 
+@@ -192,6 +198,22 @@ def test_setup_worktree_refuses_nonempty_real_dir_in_worktree(tmp_path: Path):
+         setup_worktree(repo, "demo", shared_dirs=(".beads",))
+ 
+ 
++def test_setup_epic_worktree_refuses_nonempty_real_dir_in_worktree(tmp_path: Path):
++    repo = tmp_path / "rig"
++    repo.mkdir()
++    _git("init", "-q", "-b", "main", cwd=repo)
++    _git("config", "user.email", "test@example.com", cwd=repo)
++    _git("config", "user.name", "Test", cwd=repo)
++    (repo / "a.txt").write_text("hello\n")
++    (repo / ".beads").mkdir()
++    (repo / ".beads" / "metadata.json").write_text('{"dolt_mode": "embedded"}')
++    _git("add", "-A", cwd=repo)
++    _git("commit", "-q", "-m", "init with .beads", cwd=repo)
++
++    with pytest.raises(RuntimeError, match=r"git rm -rf \.beads"):
++        setup_worktree(repo, "epic.1", shared_dirs=(".beads",), for_epic=True)
++
++
+ def test_setup_worktree_rejects_non_git_dir(tmp_path: Path):
+     plain = tmp_path / "plain"
+     plain.mkdir()
+@@ -237,6 +259,16 @@ def test_merge_worktree_round_trip(rig: Path):
+     assert len(log) >= 2, f"expected merge to land at least one new commit; log: {log}"
+ 
+ 
++def test_merge_epic_worktree_round_trip(rig: Path):
++    wt = setup_worktree(rig, "epic.1", for_epic=True)
++    (wt / "epic-added.txt").write_text("added in epic worktree\n")
++    merged_into = merge_worktree(rig, "epic.1", cleanup=True, for_epic=True)
++
++    assert merged_into == "main"
++    assert (rig / "epic-added.txt").read_text() == "added in epic worktree\n"
++    assert not wt.exists()
++
++
+ def test_merge_worktree_auto_detects_target_branch(tmp_path: Path):
+     """Default branch may be master, main, or anything else — merge_worktree
+     should auto-detect."""

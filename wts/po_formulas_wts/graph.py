@@ -138,6 +138,7 @@ def _dispatch_nodes(
     dry_run: bool,
     max_issues: int | None,
     logger: Any,
+    extra_formula_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Topo-sort `nodes` by their blocks-subgraph and submit one task per node.
 
@@ -219,11 +220,15 @@ def _dispatch_nodes(
         except (TypeError, ValueError):
             accepted = set(_REQUIRED_FORMULA_PARAMS) | {"parent_bead", "dry_run"}
         base_caps = {k: v for k, v in iter_caps.items() if k in accepted}
+        extra_caps = {
+            k: v for k, v in (extra_formula_kwargs or {}).items() if k in accepted
+        }
         kwargs: dict[str, Any] = {
             "issue_id": node["id"],
             "rig": rig,
             "rig_path": rig_path,
             **base_caps,
+            **extra_caps,
         }
         if "parent_bead" in accepted and parent_bead is not None:
             kwargs["parent_bead"] = parent_bead

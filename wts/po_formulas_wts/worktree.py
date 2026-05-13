@@ -66,13 +66,32 @@ class WorktreePaths:
 
     @classmethod
     def for_issue(cls, rig_path: Path | str, issue_id: str) -> "WorktreePaths":
+        return cls._for_id(rig_path, issue_id)
+
+    @classmethod
+    def for_epic(cls, rig_path: Path | str, epic_id: str) -> "WorktreePaths":
+        return cls._for_id(rig_path, epic_id)
+
+    @classmethod
+    def _for_id(cls, rig_path: Path | str, raw_id: str) -> "WorktreePaths":
         main = Path(rig_path).expanduser().resolve()
-        slug = sanitize(issue_id)
+        slug = sanitize(raw_id)
         return cls(
             main_rig=main,
             worktree=main.parent / f"{main.name}.wt-{slug}",
             branch=f"wts-{slug}",
         )
+
+
+def _paths_for(
+    rig_path: Path | str,
+    issue_id: str,
+    *,
+    for_epic: bool = False,
+) -> WorktreePaths:
+    if for_epic:
+        return WorktreePaths.for_epic(rig_path, issue_id)
+    return WorktreePaths.for_issue(rig_path, issue_id)
 
 
 # ─── Operations ───
@@ -160,13 +179,14 @@ def setup_worktree(
     issue_id: str,
     *,
     shared_dirs: tuple[str, ...] = (".beads", ".planning"),
+    for_epic: bool = False,
 ) -> Path:
     """Create (or refresh) a worktree for this bead. Returns the worktree path.
 
     Idempotent: if the worktree already exists at the expected path,
     refreshes the symlinks and returns it.
     """
-    paths = WorktreePaths.for_issue(rig_path, issue_id)
+    paths = _paths_for(rig_path, issue_id, for_epic=for_epic)
 
     if not _is_git_repo(paths.main_rig):
         raise RuntimeError(
@@ -209,11 +229,12 @@ def commit_pending(
     issue_id: str,
     *,
     message: str | None = None,
+    for_epic: bool = False,
 ) -> bool:
     """Stage + commit anything dirty in the worktree. Returns True if a
     commit was created. Safe to call when the tree is already clean
     (returns False)."""
-    paths = WorktreePaths.for_issue(rig_path, issue_id)
+    paths = _paths_for(rig_path, issue_id, for_epic=for_epic)
     if not paths.worktree.exists():
         return False
     if not _has_pending_changes(paths.worktree):
@@ -236,6 +257,7 @@ def merge_worktree(
     *,
     target_branch: str | None = None,
     cleanup: bool = True,
+    for_epic: bool = False,
 ) -> str:
     """Merge the bead's worktree branch back into the main rig's current
     branch (or `target_branch` if explicitly named), then optionally
@@ -245,12 +267,17 @@ def merge_worktree(
     caller decides whether to leave the worktree for resolution (set
     `cleanup=False`).
     """
-    paths = WorktreePaths.for_issue(rig_path, issue_id)
+    paths = _paths_for(rig_path, issue_id, for_epic=for_epic)
     if not paths.worktree.exists():
         logger.warning("worktree: %s missing; nothing to merge", paths.worktree)
         return target_branch or _current_branch(paths.main_rig)
 
-    commit_pending(rig_path, issue_id, message=f"[{issue_id}] pre-merge snapshot")
+    commit_pending(
+        rig_path,
+        issue_id,
+        message=f"[{issue_id}] pre-merge snapshot",
+        for_epic=for_epic,
+    )
 
     target = target_branch or _current_branch(paths.main_rig)
     # Main rig may already be on `target` — `checkout` is still safe and
@@ -260,7 +287,13 @@ def merge_worktree(
     logger.info("worktree: merged %s into %s", paths.branch, target)
 
     if cleanup:
-        cleanup_worktree(rig_path, issue_id, force=True, delete_branch=False)
+        cleanup_worktree(
+            rig_path,
+            issue_id,
+            force=True,
+            delete_branch=False,
+            for_epic=for_epic,
+        )
     return target
 
 
@@ -270,13 +303,14 @@ def cleanup_worktree(
     *,
     force: bool = False,
     delete_branch: bool = False,
+    for_epic: bool = False,
 ) -> None:
     """Remove the worktree directory + (optionally) its branch.
 
     `force=True` reclaims a worktree that was left in a dirty state
     by a crash. `delete_branch=True` also drops the per-bead branch
     (useful after a successful merge; not after a failure)."""
-    paths = WorktreePaths.for_issue(rig_path, issue_id)
+    paths = _paths_for(rig_path, issue_id, for_epic=for_epic)
 
     if paths.worktree.exists():
         args = ["git", "worktree", "remove"]

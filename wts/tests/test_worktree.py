@@ -85,6 +85,12 @@ def test_worktree_paths_for_issue(tmp_path: Path):
     assert paths.branch == "wts-x_1_2"
 
 
+def test_worktree_paths_for_epic_reuses_issue_naming(tmp_path: Path):
+    issue_paths = WorktreePaths.for_issue(tmp_path / "myrig", "epic.1")
+    epic_paths = WorktreePaths.for_epic(tmp_path / "myrig", "epic.1")
+    assert epic_paths == issue_paths
+
+
 # ─── _is_git_repo ───
 
 
@@ -192,6 +198,22 @@ def test_setup_worktree_refuses_nonempty_real_dir_in_worktree(tmp_path: Path):
         setup_worktree(repo, "demo", shared_dirs=(".beads",))
 
 
+def test_setup_epic_worktree_refuses_nonempty_real_dir_in_worktree(tmp_path: Path):
+    repo = tmp_path / "rig"
+    repo.mkdir()
+    _git("init", "-q", "-b", "main", cwd=repo)
+    _git("config", "user.email", "test@example.com", cwd=repo)
+    _git("config", "user.name", "Test", cwd=repo)
+    (repo / "a.txt").write_text("hello\n")
+    (repo / ".beads").mkdir()
+    (repo / ".beads" / "metadata.json").write_text('{"dolt_mode": "embedded"}')
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "init with .beads", cwd=repo)
+
+    with pytest.raises(RuntimeError, match=r"git rm -rf \.beads"):
+        setup_worktree(repo, "epic.1", shared_dirs=(".beads",), for_epic=True)
+
+
 def test_setup_worktree_rejects_non_git_dir(tmp_path: Path):
     plain = tmp_path / "plain"
     plain.mkdir()
@@ -235,6 +257,16 @@ def test_merge_worktree_round_trip(rig: Path):
     # Main rig's HEAD now has the wt commit ahead of init
     log = _git("log", "--oneline", cwd=rig).stdout.strip().splitlines()
     assert len(log) >= 2, f"expected merge to land at least one new commit; log: {log}"
+
+
+def test_merge_epic_worktree_round_trip(rig: Path):
+    wt = setup_worktree(rig, "epic.1", for_epic=True)
+    (wt / "epic-added.txt").write_text("added in epic worktree\n")
+    merged_into = merge_worktree(rig, "epic.1", cleanup=True, for_epic=True)
+
+    assert merged_into == "main"
+    assert (rig / "epic-added.txt").read_text() == "added in epic worktree\n"
+    assert not wt.exists()
 
 
 def test_merge_worktree_auto_detects_target_branch(tmp_path: Path):

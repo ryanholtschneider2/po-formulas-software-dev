@@ -37,6 +37,7 @@ from prefect_orchestration.beads_meta import close_issue, list_epic_children
 from prefect_orchestration.parsing import read_verdict
 
 from po_formulas_wts.software_dev import _agent_dir, _agent_step_task, _task_md
+from po_formulas_wts.worktree import merge_worktree
 
 # Default rig-relative path to the smoke walkthrough script. Override via
 # the `walkthrough_script` param to epic_finalize. Repos that don't ship a
@@ -65,6 +66,27 @@ def _stamp_metadata(epic_id: str, key: str, value: str, rig_path: Path) -> None:
         )
     except Exception:
         pass
+
+
+def _bd_metadata(bead_id: str, rig_path: Path) -> dict[str, Any]:
+    proc = subprocess.run(
+        ["bd", "show", bead_id, "--json"],
+        cwd=str(rig_path),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return {}
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {}
+    row = data[0] if isinstance(data, list) and data else data
+    if not isinstance(row, dict):
+        return {}
+    metadata = row.get("metadata") or {}
+    return metadata if isinstance(metadata, dict) else {}
 
 
 def _smoke_has_ui_evidence(smoke_out_dir: Path) -> bool:
@@ -280,6 +302,9 @@ def epic_finalize(
     ci_timeout_s: int = DEFAULT_CI_TIMEOUT_S,
     dry_run: bool = False,
     claim: bool = True,
+    worktree_path: str | None = None,
+    branch: str | None = None,
+    merge_target_branch: str = "main",
 ) -> dict[str, Any]:
     """End-of-epic batch verification formula.
 
@@ -316,6 +341,18 @@ def epic_finalize(
     rig_path_p = Path(rig_path).expanduser().resolve()
     run_dir = rig_path_p / ".planning" / "epics" / epic_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    metadata = _bd_metadata(epic_id, rig_path_p)
+    worktree_path = worktree_path or str(metadata.get("work_dir") or "")
+    repo_path = (
+        Path(worktree_path).expanduser().resolve()
+        if worktree_path
+        else rig_path_p
+    )
+    branch_name = branch or str(metadata.get("branch") or "") or _current_branch(repo_path)
+    merge_target = (
+        str(metadata.get("merge_target_branch") or "").strip()
+        or merge_target_branch
+    )
 
     # 1. Defensive check — all children should be closed by bead-dep blocking,
     #    but log if something slipped through.
@@ -340,11 +377,11 @@ def epic_finalize(
             logger.warning("spec-audit: spec_path=%s not found", resolved_spec)
             resolved_spec = None
     else:
-        resolved_spec = _discover_spec_path(rig_path_p)
+        resolved_spec = _discover_spec_path(repo_path)
         if resolved_spec is None:
             logger.info(
                 "spec-audit: no spec.md found at %s — skipping",
-                rig_path_p.parent / "spec.md",
+                repo_path.parent / "spec.md",
             )
 
     if resolved_spec is not None and not dry_run:
@@ -353,14 +390,14 @@ def epic_finalize(
             agent_dir=_agent_dir("spec-auditor"),
             task=_task_md("spec-auditor"),
             seed_id=epic_id,
-            rig_path=str(rig_path_p),
+            rig_path=str(repo_path),
             run_dir=run_dir,
             step="spec-audit",
             iter_n=1,
             ctx={
                 "epic_id": epic_id,
                 "spec_path": str(resolved_spec),
-                "rig_path": str(rig_path_p),
+                "rig_path": str(repo_path),
                 "run_dir": str(run_dir),
             },
             dry_run=False,
@@ -388,14 +425,14 @@ def epic_finalize(
     # 3. Full test suite.
     if not dry_run:
         for target in ("test-unit", "test-e2e"):
-            rc, out = _run_make(target, rig_path_p)
+            rc, out = _run_make(target, repo_path)
             logger.info("make %s: rc=%d\n%s", target, rc, out[:2000])
             if rc != 0:
                 failures.append(f"make {target} failed (rc={rc})")
 
     # 3. Lint.
     if not dry_run:
-        rc, out = _run_make("lint", rig_path_p)
+        rc, out = _run_make("lint", repo_path)
         logger.info("make lint: rc=%d\n%s", rc, out[:2000])
         if rc != 0:
             failures.append(f"make lint failed (rc={rc})")
@@ -404,7 +441,7 @@ def epic_finalize(
     smoke_result: dict[str, Any] = {"verdict": "SKIPPED"}
     if not skip_walkthrough and walkthrough_script != "" and not dry_run:
         smoke_result = _run_smoke_walkthrough(
-            rig_path_p,
+            repo_path,
             walkthrough_script or DEFAULT_WALKTHROUGH_SCRIPT,
             run_dir,
         )
@@ -438,7 +475,7 @@ def epic_finalize(
                 agent_dir=_agent_dir("demo-video"),
                 task=_task_md("demo-video"),
                 seed_id=epic_id,
-                rig_path=str(rig_path_p),
+                rig_path=str(repo_path),
                 run_dir=run_dir,
                 step="demo-video",
                 iter_n=1,
@@ -446,7 +483,7 @@ def epic_finalize(
                     "epic_id": epic_id,
                     "smoke_out_dir": str(smoke_out_dir),
                     "smoke_report": smoke_result.get("report_path"),
-                    "rig_path": str(rig_path_p),
+                    "rig_path": str(repo_path),
                     "run_dir": str(run_dir),
                 },
                 dry_run=False,
@@ -454,10 +491,10 @@ def epic_finalize(
             # Discover the produced mp4: agent writes to
             # research/<branch-slug>/demo-<utc>/demo_final.mp4 per the
             # demo-video skill convention.
-            branch = _current_branch(rig_path_p) or "unknown-branch"
-            branch_slug = branch.replace("/", "-")
+            demo_branch = branch_name or _current_branch(repo_path) or "unknown-branch"
+            branch_slug = demo_branch.replace("/", "-")
             candidates = sorted(
-                (rig_path_p / "research" / branch_slug).glob("demo-*/demo_final.mp4"),
+                (repo_path / "research" / branch_slug).glob("demo-*/demo_final.mp4"),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
@@ -475,7 +512,7 @@ def epic_finalize(
     # 5b. Optional legacy smoke command (free-form shell blob).
     if smoke_cmd and not dry_run:
         result = subprocess.run(
-            smoke_cmd, shell=True, cwd=str(rig_path_p), capture_output=True, text=True
+            smoke_cmd, shell=True, cwd=str(repo_path), capture_output=True, text=True
         )
         logger.info("smoke_cmd rc=%d\n%s", result.returncode, result.stdout[:2000])
         if result.returncode != 0:
@@ -486,9 +523,8 @@ def epic_finalize(
     #     work we already know is broken).
     ci_result: dict[str, Any] = {"verdict": "skipped", "summary": "not run"}
     if not skip_remote_ci and not failures and not dry_run:
-        branch = _current_branch(rig_path_p)
-        if branch:
-            ci_result = _run_remote_ci_gate(rig_path_p, branch, ci_timeout_s)
+        if branch_name:
+            ci_result = _run_remote_ci_gate(repo_path, branch_name, ci_timeout_s)
             logger.info(
                 "remote-ci: pr=%s verdict=%s %s",
                 ci_result.get("pr"),
@@ -523,7 +559,7 @@ def epic_finalize(
             agent_dir=_agent_dir("documenter"),
             task=_task_md("documenter"),
             seed_id=epic_id,
-            rig_path=str(rig_path_p),
+            rig_path=str(repo_path),
             run_dir=run_dir,
             step="docs",
             iter_n=1,
@@ -568,6 +604,17 @@ def epic_finalize(
     post_flight.write_text("\n".join(lines) + "\n")
     logger.info("post-flight artifact: %s", post_flight)
 
+    merged_into: str | None = None
+    if not failures and not dry_run and worktree_path:
+        merged_into = merge_worktree(
+            rig_path_p,
+            epic_id,
+            target_branch=merge_target,
+            cleanup=True,
+            for_epic=True,
+        )
+        logger.info("epic-finalize: merged %s into %s", branch_name, merged_into)
+
     # 7. Close epic if all passed.
     if not failures and not dry_run:
         close_issue(
@@ -591,4 +638,8 @@ def epic_finalize(
         "smoke": smoke_result,
         "demo_video_path": demo_video_path,
         "ci": ci_result,
+        "merged_into": merged_into,
+        "worktree_path": str(repo_path),
+        "branch": branch_name,
+        "merge_target_branch": merge_target,
     }

@@ -29,6 +29,7 @@ Filed under: prefect-orchestration-54n.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,18 @@ from po_formulas_wts.epic import epic_run
 from po_formulas_wts.epic_finalize import epic_finalize
 from po_formulas_wts.pre_pr_review import pre_pr_review
 from po_formulas_wts.pr_writer import pr_writer
+from po_formulas_wts.worktree import WorktreePaths, setup_worktree
+
+
+def _stamp_metadata(epic_id: str, rig_path: Path, values: dict[str, str]) -> None:
+    for key, value in values.items():
+        subprocess.run(
+            ["bd", "update", epic_id, "--set-metadata", f"{key}={value}"],
+            cwd=str(rig_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
 
 @flow(name="epic_wts", flow_run_name="{epic_id}", log_prints=True)
@@ -79,6 +92,24 @@ def epic_wts(
     logger = get_run_logger()
     rig_path_p = Path(rig_path).expanduser().resolve()
     out: dict[str, Any] = {"epic_id": epic_id, "verdict": "unknown"}
+    paths = WorktreePaths.for_epic(rig_path_p, epic_id)
+
+    logger.info("epic_wts: preparing shared worktree %s", paths.worktree)
+    shared_worktree = setup_worktree(rig_path_p, epic_id, for_epic=True)
+    _stamp_metadata(
+        epic_id,
+        rig_path_p,
+        {
+            "work_dir": str(shared_worktree),
+            "branch": paths.branch,
+            "merge_target_branch": merge_target_branch,
+        },
+    )
+    out["worktree"] = {
+        "path": str(shared_worktree),
+        "branch": paths.branch,
+        "merge_target_branch": merge_target_branch,
+    }
 
     # 1. Fan-out.
     logger.info("epic_wts: dispatching children via epic_run")
@@ -90,6 +121,10 @@ def epic_wts(
         max_issues=max_issues,
         discover=discover,
         child_ids=child_ids,
+        parent_epic_worktree=str(shared_worktree),
+        parent_epic_branch=paths.branch,
+        parent_epic_id=epic_id,
+        merge_target_branch=merge_target_branch,
     )
     out["epic_run"] = epic_out
     epic_failed = bool(epic_out.get("failed_ids") or epic_out.get("errors"))
@@ -128,6 +163,9 @@ def epic_wts(
         "skip_demo_video": skip_demo_video,
         "skip_remote_ci": skip_remote_ci,
         "dry_run": dry_run,
+        "worktree_path": str(shared_worktree),
+        "branch": paths.branch,
+        "merge_target_branch": merge_target_branch,
     }
     if ci_timeout_s is not None:
         finalize_kwargs["ci_timeout_s"] = ci_timeout_s
@@ -152,6 +190,8 @@ def epic_wts(
             epic_id=epic_id,
             rig=rig,
             rig_path=str(rig_path_p),
+            branch=paths.branch,
+            merge_target=merge_target_branch,
             dry_run=dry_run,
         )
         out["pr_writer"] = pr_out

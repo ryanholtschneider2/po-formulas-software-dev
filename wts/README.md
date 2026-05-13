@@ -27,6 +27,12 @@ A formula pack for [`prefect-orchestration`](../../../prefect-orchestration)
   and stamps `metadata.validation = passed | blocked` on the epic so
   the PR-writer can gate. Invoke with `--epic-id <id>` or
   `--branch <name>` (mutually exclusive).
+- **`epic-wts`** — end-to-end epic runner. It creates one shared
+  worktree for the epic at `<rig-path>.wt-<sanitized-epic-id>/` on
+  branch `wts-<sanitized-epic-id>`, runs every child
+  `software-dev-full-wts` flow inside that worktree, reviews and
+  finalizes the accumulated branch, then merges it into the configured
+  target branch and removes the worktree after green gates.
 
 `epic` and `minimal-task` are NOT registered by this pack — use the
 parent `po-formulas-software-dev` registrations for those today.
@@ -145,6 +151,35 @@ po run epic --epic-id sr-8yu --rig site --rig-path ... \
 # Dry run (no Claude calls, no edits — exercises DAG only)
 po run software-dev-full --dry-run --issue-id sr-8yu.3 ...
 ```
+
+### Epic WTS shared worktree lifecycle
+
+`epic-wts` owns the worktree lifecycle for its children. At the start
+of an epic run it creates or reuses:
+
+```text
+<rig-path>.wt-<sanitized-epic-id>/  on branch  wts-<sanitized-epic-id>
+```
+
+The epic bead is stamped with `metadata.work_dir`, `metadata.branch`,
+and `metadata.merge_target_branch`. Each child `software-dev-full-wts`
+run receives the same values and stamps its own metadata with
+`work_dir`, `branch`, `merge_target_branch`, and `epic_id`. That durable
+metadata lets `po retry <child-id>` re-enter the existing epic worktree
+instead of creating a per-child `<rig>.wt-<child-id>/`.
+
+Child flows skip their standalone worktree setup and per-child merge
+when an epic-managed worktree is present. Their commits land directly
+on `wts-<sanitized-epic-id>`. If a child, review, finalize, smoke, or
+CI step fails, the shared worktree is intentionally preserved for
+inspection and retry.
+
+After `epic_finalize_wts` passes local gates and remote CI for the epic
+branch, it merges `wts-<sanitized-epic-id>` into
+`metadata.merge_target_branch` (default `main`) and removes the shared
+worktree. Parallel `epic-wts` runs against the same rig are isolated by
+their distinct sanitized epic ids, so they use different worktree paths
+and branches.
 
 ### Epic discovery modes
 

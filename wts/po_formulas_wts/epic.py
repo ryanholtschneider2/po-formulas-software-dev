@@ -80,6 +80,10 @@ def epic_run(
     max_issues: int | None = None,
     discover: str = "both",
     child_ids: str | None = None,
+    parent_epic_worktree: str | None = None,
+    parent_epic_branch: str | None = None,
+    parent_epic_id: str | None = None,
+    merge_target_branch: str = "main",
 ) -> dict[str, Any]:
     """Fan out an epic's open children as concurrent software_dev_full runs.
 
@@ -146,5 +150,11 @@ def epic_run(
         dry_run=dry_run,
         max_issues=max_issues,
         logger=logger,
+        extra_formula_kwargs={
+            "parent_epic_worktree": parent_epic_worktree,
+            "parent_epic_branch": parent_epic_branch,
+            "parent_epic_id": parent_epic_id or epic_id,
+            "parent_epic_merge_target": merge_target_branch,
+        },
     )
     return {"epic_id": epic_id, **out}
