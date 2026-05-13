@@ -67,3 +67,5 @@ _Add a brief overview of your project architecture_
 ## Conventions & Patterns
 
 _Add your project-specific conventions here_
+
+- In WTS finalize flows, run every branch-mutating step before the remote CI gate. `merge_worktree()` commits pending changes before merging, so any documenter or cleanup step that can edit files after CI would merge unvalidated bytes.
