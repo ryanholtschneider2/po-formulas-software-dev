@@ -1098,6 +1098,10 @@ def software_dev_fast(
     parent_bead: str | None = None,
     dry_run: bool = False,
     claim: bool = True,
+    parent_epic_worktree: str | None = None,
+    parent_epic_branch: str | None = None,
+    parent_epic_id: str | None = None,
+    parent_epic_merge_target: str | None = None,
 ) -> dict[str, Any]:
     """Fast linear pipeline: plan → build → lint → unit-test → docs → close.
 
@@ -1113,7 +1117,26 @@ def software_dev_fast(
     working without a parallel directory.
     """
     logger = get_run_logger()
-    rig_path_p = Path(rig_path).expanduser().resolve()
+    main_rig_path_p = Path(rig_path).expanduser().resolve()
+    epic_worktree_context = _resolve_epic_worktree_context(
+        issue_id,
+        main_rig_path_p,
+        parent_epic_worktree=parent_epic_worktree,
+        parent_epic_branch=parent_epic_branch,
+        parent_epic_id=parent_epic_id,
+        parent_epic_merge_target=parent_epic_merge_target,
+    )
+    rig_path_p = (
+        Path(epic_worktree_context["work_dir"]).expanduser().resolve()
+        if epic_worktree_context is not None
+        else main_rig_path_p
+    )
+    if epic_worktree_context is not None:
+        logger.info(
+            "worktree: using parent epic worktree %s on branch %s",
+            rig_path_p,
+            epic_worktree_context.get("branch") or "(unknown)",
+        )
     _load_rig_env(rig_path_p)
     _tag_flow_run_with_issue_id(issue_id, logger)
 
@@ -1124,11 +1147,25 @@ def software_dev_fast(
     os.environ.setdefault("PO_MODEL", "sonnet")
     os.environ.setdefault("PO_EFFORT", "medium")
 
-    run_dir = rig_path_p / ".planning" / "software-dev-full" / issue_id
+    run_dir = main_rig_path_p / ".planning" / "software-dev-full" / issue_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
     if claim and not dry_run:
         claim_issue(issue_id, assignee=f"po-{os.getpid()}", rig_path=rig_path_p)
+        if epic_worktree_context is not None:
+            _stamp_metadata(
+                issue_id,
+                main_rig_path_p,
+                {
+                    "work_dir": epic_worktree_context["work_dir"],
+                    "branch": epic_worktree_context.get("branch") or "",
+                    "merge_target_branch": epic_worktree_context.get(
+                        "merge_target_branch"
+                    )
+                    or "main",
+                    "epic_id": epic_worktree_context.get("epic_id") or "",
+                },
+            )
 
     _agent_step_task(
         agent_dir=_agent_dir("planner"),
@@ -1248,6 +1285,10 @@ def software_dev_edit(
     parent_bead: str | None = None,
     dry_run: bool = False,
     claim: bool = True,
+    parent_epic_worktree: str | None = None,
+    parent_epic_branch: str | None = None,
+    parent_epic_id: str | None = None,
+    parent_epic_merge_target: str | None = None,
 ) -> dict[str, Any]:
     """Ultra-thin pipeline: plan → build → close.
 
@@ -1257,18 +1298,51 @@ def software_dev_edit(
     pair with `epic-finalize` as last child for the lint/test gate.
     """
     logger = get_run_logger()
-    rig_path_p = Path(rig_path).expanduser().resolve()
+    main_rig_path_p = Path(rig_path).expanduser().resolve()
+    epic_worktree_context = _resolve_epic_worktree_context(
+        issue_id,
+        main_rig_path_p,
+        parent_epic_worktree=parent_epic_worktree,
+        parent_epic_branch=parent_epic_branch,
+        parent_epic_id=parent_epic_id,
+        parent_epic_merge_target=parent_epic_merge_target,
+    )
+    rig_path_p = (
+        Path(epic_worktree_context["work_dir"]).expanduser().resolve()
+        if epic_worktree_context is not None
+        else main_rig_path_p
+    )
+    if epic_worktree_context is not None:
+        logger.info(
+            "worktree: using parent epic worktree %s on branch %s",
+            rig_path_p,
+            epic_worktree_context.get("branch") or "(unknown)",
+        )
     _load_rig_env(rig_path_p)
     _tag_flow_run_with_issue_id(issue_id, logger)
 
     os.environ.setdefault("PO_MODEL", "haiku")
     os.environ.setdefault("PO_EFFORT", "low")
 
-    run_dir = rig_path_p / ".planning" / "software-dev-full" / issue_id
+    run_dir = main_rig_path_p / ".planning" / "software-dev-full" / issue_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
     if claim and not dry_run:
         claim_issue(issue_id, assignee=f"po-{os.getpid()}", rig_path=rig_path_p)
+        if epic_worktree_context is not None:
+            _stamp_metadata(
+                issue_id,
+                main_rig_path_p,
+                {
+                    "work_dir": epic_worktree_context["work_dir"],
+                    "branch": epic_worktree_context.get("branch") or "",
+                    "merge_target_branch": epic_worktree_context.get(
+                        "merge_target_branch"
+                    )
+                    or "main",
+                    "epic_id": epic_worktree_context.get("epic_id") or "",
+                },
+            )
 
     _agent_step_task(
         agent_dir=_agent_dir("planner"),
