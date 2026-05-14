@@ -302,6 +302,14 @@ def _run_pillar_1(
 # ─────────────────────── pillar 2 ────────────────────────────────────
 
 
+def _resolve_merge_target_ref(branch: str, work_dir: Path) -> str:
+    """Return local ref if it exists locally, else origin/<branch>."""
+    proc = _run(["git", "rev-parse", "--verify", branch], cwd=work_dir)
+    if proc.returncode == 0:
+        return branch
+    return f"origin/{branch}"
+
+
 def _stage_pillar2_inputs(
     epic_id: str | None,
     branch: str,
@@ -314,8 +322,9 @@ def _stage_pillar2_inputs(
     plan_path = _epic_plan_path(rig_path, epic_id)
     if plan_path is not None:
         (report_dir / "epic-plan.md").write_text(plan_path.read_text())
+    target_ref = _resolve_merge_target_ref(merge_target, work_dir)
     diff_proc = _run(
-        ["git", "diff", f"origin/{merge_target}..{branch}"],
+        ["git", "diff", f"{target_ref}..{branch}"],
         cwd=work_dir,
     )
     (report_dir / "cumulative.diff").write_text(diff_proc.stdout)

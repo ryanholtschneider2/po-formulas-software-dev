@@ -300,3 +300,50 @@ def test_pillar2_findings_parsed_and_filed(tmp_path, monkeypatch):
         joined = " ".join(c)
         assert "--type=bug" in joined or "type=bug" in joined
         assert "priority=1" in joined or "--priority=1" in joined
+
+
+# ─────────────────────── pillar 2 ref resolution ─────────────────────
+
+
+def test_pillar2_uses_local_merge_target_when_no_origin(tmp_path, monkeypatch):
+    """When local 'main' exists, cumulative diff uses 'main..branch', not 'origin/main..branch'."""
+    diff_calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        if cmd[:3] == ["git", "rev-parse", "--verify"]:
+            # local 'main' exists
+            return _cp(stdout="abc123", returncode=0)
+        if "diff" in cmd:
+            diff_calls.append(list(cmd))
+        return _cp(stdout="")
+
+    monkeypatch.setattr(ppr, "_run", fake_run)
+
+    report_dir = tmp_path / "report"
+    report_dir.mkdir()
+    ppr._stage_pillar2_inputs(None, "wts-branch", tmp_path, "main", tmp_path, report_dir)
+
+    assert len(diff_calls) == 1
+    assert diff_calls[0][2] == "main..wts-branch"
+
+
+def test_pillar2_falls_back_to_origin_when_local_branch_missing(tmp_path, monkeypatch):
+    """When local 'main' doesn't exist, cumulative diff falls back to 'origin/main..branch'."""
+    diff_calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        if cmd[:3] == ["git", "rev-parse", "--verify"]:
+            # local 'main' not found
+            return _cp(stdout="", returncode=128)
+        if "diff" in cmd:
+            diff_calls.append(list(cmd))
+        return _cp(stdout="")
+
+    monkeypatch.setattr(ppr, "_run", fake_run)
+
+    report_dir = tmp_path / "report"
+    report_dir.mkdir()
+    ppr._stage_pillar2_inputs(None, "wts-branch", tmp_path, "main", tmp_path, report_dir)
+
+    assert len(diff_calls) == 1
+    assert diff_calls[0][2] == "origin/main..wts-branch"
