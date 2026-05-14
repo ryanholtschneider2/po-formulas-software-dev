@@ -18,9 +18,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -41,12 +39,18 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _cp(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+    return subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=""
+    )
 
 
 def _patch_subprocess(monkeypatch, side_effect_fn=None):
     """Patch both ppr.subprocess.run and ppr._run to the fake."""
-    fake = MagicMock(side_effect=side_effect_fn) if side_effect_fn else MagicMock(return_value=_cp())
+    fake = (
+        MagicMock(side_effect=side_effect_fn)
+        if side_effect_fn
+        else MagicMock(return_value=_cp())
+    )
     monkeypatch.setattr(ppr.subprocess, "run", fake)
     monkeypatch.setattr(ppr, "_run", lambda cmd, **kw: fake(cmd, **kw))
     return fake
@@ -62,7 +66,9 @@ def test_mutual_exclusion_both_none(tmp_path):
 
 def test_mutual_exclusion_both_set(tmp_path):
     with pytest.raises(ValueError, match="exactly one"):
-        ppr.pre_pr_review.fn(epic_id="nanocorps-abc", branch="my-branch", rig_path=str(tmp_path))
+        ppr.pre_pr_review.fn(
+            epic_id="nanocorps-abc", branch="my-branch", rig_path=str(tmp_path)
+        )
 
 
 # ─────────────────────── pillar-2 parser ─────────────────────────────
@@ -81,9 +87,7 @@ def test_parse_pillar2_findings_three():
 
 
 def test_parse_pillar2_findings_approved():
-    text = (
-        "# Pillar 2\n\n**Verdict:** approved\n\n## Findings\n\n"
-    )
+    text = "# Pillar 2\n\n**Verdict:** approved\n\n## Findings\n\n"
     findings = _parse_pillar2_findings(text)
     assert findings == []
 
@@ -99,11 +103,17 @@ def test_missing_worktree_blocks_run(tmp_path, monkeypatch):
             bd_calls.append(list(cmd))
         return _cp()
 
-    monkeypatch.setattr(ppr, "_bd_show_metadata", lambda *a, **kw: {"work_dir": "", "no_worktree": "false"})
+    monkeypatch.setattr(
+        ppr,
+        "_bd_show_metadata",
+        lambda *a, **kw: {"work_dir": "", "no_worktree": "false"},
+    )
     monkeypatch.setattr(ppr, "_run", fake_run)
     monkeypatch.setattr(ppr.subprocess, "run", lambda cmd, **kw: _cp())
 
-    result = ppr.pre_pr_review.fn(epic_id="nanocorps-test", branch=None, rig_path=str(tmp_path), dry_run=True)
+    result = ppr.pre_pr_review.fn(
+        epic_id="nanocorps-test", branch=None, rig_path=str(tmp_path), dry_run=True
+    )
 
     # All three pillars should be SKIPPED
     assert result["pillars"]["pillar-1"] == _VERDICT_SKIPPED
@@ -132,7 +142,9 @@ def test_pillar1_regression_files_bug(tmp_path, monkeypatch):
             return _cp(returncode=1, stdout="FAILED: tests/foo.py::test_x")
         return _cp()
 
-    monkeypatch.setattr(ppr, "_resolve_worktree", lambda *a, **kw: (tmp_path, "my-branch", "main", []))
+    monkeypatch.setattr(
+        ppr, "_resolve_worktree", lambda *a, **kw: (tmp_path, "my-branch", "main", [])
+    )
     # pillar-1 uses _make_target_outcomes + _baseline_checkout; stub both
     monkeypatch.setattr(
         ppr,
@@ -143,8 +155,16 @@ def test_pillar1_regression_files_bug(tmp_path, monkeypatch):
             findings=[("lint", "FAILED log")],
         ),
     )
-    monkeypatch.setattr(ppr, "_run_pillar_2", lambda *a, **kw: PillarResult(name="pillar-2", verdict=_VERDICT_SKIPPED))
-    monkeypatch.setattr(ppr, "_run_pillar_3", lambda *a, **kw: PillarResult(name="pillar-3", verdict=_VERDICT_SKIPPED))
+    monkeypatch.setattr(
+        ppr,
+        "_run_pillar_2",
+        lambda *a, **kw: PillarResult(name="pillar-2", verdict=_VERDICT_SKIPPED),
+    )
+    monkeypatch.setattr(
+        ppr,
+        "_run_pillar_3",
+        lambda *a, **kw: PillarResult(name="pillar-3", verdict=_VERDICT_SKIPPED),
+    )
 
     bd_create_calls: list[list[str]] = []
 
@@ -156,13 +176,17 @@ def test_pillar1_regression_files_bug(tmp_path, monkeypatch):
     monkeypatch.setattr(ppr, "_run", fake_run)
     monkeypatch.setattr(ppr.subprocess, "run", lambda cmd, **kw: _cp())
 
-    result = ppr.pre_pr_review.fn(epic_id="nanocorps-test", branch=None, rig_path=str(tmp_path), dry_run=False)
+    result = ppr.pre_pr_review.fn(
+        epic_id="nanocorps-test", branch=None, rig_path=str(tmp_path), dry_run=False
+    )
 
     # Pillar-1 should have FAILED verdict
     assert result["pillars"]["pillar-1"] == _VERDICT_FAILED
     # Regression findings should be filed as bugs
-    assert any("--type=bug" in " ".join(c) or "type=bug" in " ".join(c) for c in bd_create_calls), \
-        f"no bug bead created; bd calls: {bd_create_calls}"
+    assert any(
+        "--type=bug" in " ".join(c) or "type=bug" in " ".join(c)
+        for c in bd_create_calls
+    ), f"no bug bead created; bd calls: {bd_create_calls}"
 
 
 def _record(lst, cmd):
@@ -238,10 +262,14 @@ def test_pillar3_teardown_after_exception(tmp_path, monkeypatch):
     mock_proc.poll.return_value = None
 
     monkeypatch.setattr(ppr.subprocess, "Popen", lambda *a, **kw: mock_proc)
-    monkeypatch.setattr(ppr, "_run", lambda cmd, **kw: _cp(returncode=1, stdout="dev-up started"))
+    monkeypatch.setattr(
+        ppr, "_run", lambda cmd, **kw: _cp(returncode=1, stdout="dev-up started")
+    )
 
     # Make agent_step raise to simulate mid-pillar failure
-    monkeypatch.setattr(ppr, "_agent_step_task", MagicMock(side_effect=RuntimeError("agent crashed")))
+    monkeypatch.setattr(
+        ppr, "_agent_step_task", MagicMock(side_effect=RuntimeError("agent crashed"))
+    )
 
     with pytest.raises(RuntimeError, match="agent crashed"):
         ppr._run_pillar_3(
@@ -263,7 +291,9 @@ def test_report_section_headings(tmp_path):
     p1 = PillarResult(name="pillar-1", verdict=_VERDICT_PASSED, summary="ok")
     p2 = PillarResult(name="pillar-2", verdict=_VERDICT_PASSED, summary="ok")
     p3 = PillarResult(name="pillar-3", verdict=_VERDICT_SKIPPED, summary="skipped")
-    report_path = ppr._write_validation_report(tmp_path, p1, p2, p3, [], "my-branch", "main")
+    report_path = ppr._write_validation_report(
+        tmp_path, p1, p2, p3, [], "my-branch", "main"
+    )
     text = report_path.read_text()
     h1_positions = {
         "pillar1": text.find("# Pillar 1"),
@@ -321,7 +351,9 @@ def test_pillar2_uses_local_merge_target_when_no_origin(tmp_path, monkeypatch):
 
     report_dir = tmp_path / "report"
     report_dir.mkdir()
-    ppr._stage_pillar2_inputs(None, "wts-branch", tmp_path, "main", tmp_path, report_dir)
+    ppr._stage_pillar2_inputs(
+        None, "wts-branch", tmp_path, "main", tmp_path, report_dir
+    )
 
     assert len(diff_calls) == 1
     assert diff_calls[0][2] == "main..wts-branch"
@@ -343,7 +375,9 @@ def test_pillar2_falls_back_to_origin_when_local_branch_missing(tmp_path, monkey
 
     report_dir = tmp_path / "report"
     report_dir.mkdir()
-    ppr._stage_pillar2_inputs(None, "wts-branch", tmp_path, "main", tmp_path, report_dir)
+    ppr._stage_pillar2_inputs(
+        None, "wts-branch", tmp_path, "main", tmp_path, report_dir
+    )
 
     assert len(diff_calls) == 1
     assert diff_calls[0][2] == "origin/main..wts-branch"
