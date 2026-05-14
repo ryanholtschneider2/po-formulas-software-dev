@@ -563,16 +563,19 @@ def software_dev_full(
     elif use_worktree and not os.environ.get("PO_WTS_NO_WORKTREE"):
         try:
             from po_formulas_wts.worktree import _is_git_repo, setup_worktree
+
             if _is_git_repo(main_rig_path_p):
                 rig_path_p = setup_worktree(main_rig_path_p, issue_id)
                 worktree_enabled = True
                 logger.info(
                     "worktree: enabled — agent cwd=%s, bd+planning via symlink to %s",
-                    rig_path_p, main_rig_path_p,
+                    rig_path_p,
+                    main_rig_path_p,
                 )
             else:
                 logger.info(
-                    "worktree: skipped — %s is not a git repo", main_rig_path_p,
+                    "worktree: skipped — %s is not a git repo",
+                    main_rig_path_p,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("worktree: setup failed (%s); falling back to main rig", exc)
@@ -1047,6 +1050,7 @@ def software_dev_full(
         merged_into = None
         if worktree_enabled:
             from po_formulas_wts.worktree import merge_worktree
+
             try:
                 merged_into = merge_worktree(main_rig_path_p, issue_id, cleanup=True)
                 logger.info("worktree: merged into %s", merged_into)
@@ -1060,7 +1064,9 @@ def software_dev_full(
 
         # Close the seed.
         if claim and not dry_run:
-            close_issue(issue_id, notes="po simple-mode complete", rig_path=main_rig_path_p)
+            close_issue(
+                issue_id, notes="po simple-mode complete", rig_path=main_rig_path_p
+            )
 
         return {
             "status": "completed",
