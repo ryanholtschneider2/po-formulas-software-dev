@@ -129,19 +129,6 @@ def test_missing_worktree_blocks_run(tmp_path, monkeypatch):
 
 
 def test_pillar1_regression_files_bug(tmp_path, monkeypatch):
-    bd_create_calls: list[list[str]] = []
-
-    def fake_run(cmd, **kw):
-        if "bd" in cmd and "create" in cmd:
-            bd_create_calls.append(list(cmd))
-            return _cp()
-        if "bd" in cmd:
-            return _cp()
-        # make targets: simulate lint FAIL on branch, pass on baseline
-        if "make" in cmd:
-            return _cp(returncode=1, stdout="FAILED: tests/foo.py::test_x")
-        return _cp()
-
     monkeypatch.setattr(
         ppr, "_resolve_worktree", lambda *a, **kw: (tmp_path, "my-branch", "main", [])
     )
