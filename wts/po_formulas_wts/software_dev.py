@@ -545,7 +545,7 @@ def software_dev_full(
     )
 
     # Worktree isolation. When enabled (default), each bead runs in its
-    # own git worktree at `<rig>.wt-<id>/` on branch `wts-<id>`.
+    # own git worktree at `<rig>/.worktrees/wts-<id>/` on branch `wts-<id>`.
     # `.beads/` + `.planning/` are symlinked back to the main rig so bd
     # ops and run-dir artifacts stay in one authoritative location.
     # Disable via use_worktree=False or env PO_WTS_NO_WORKTREE=1.
@@ -1057,7 +1057,7 @@ def software_dev_full(
             except Exception as exc:  # noqa: BLE001
                 logger.error(
                     "worktree: merge failed (%s); leaving worktree at "
-                    "<rig>.wt-<id> for resolution. Re-run after fixing.",
+                    "<rig>/.worktrees/wts-<id> for resolution. Re-run after fixing.",
                     exc,
                 )
                 raise

@@ -28,7 +28,7 @@ A formula pack for [`prefect-orchestration`](../../../prefect-orchestration)
   the PR-writer can gate. Invoke with `--epic-id <id>` or
   `--branch <name>` (mutually exclusive).
 - **`epic-wts`** — end-to-end epic runner. It creates one shared
-  worktree for the epic at `<rig-path>.wt-<sanitized-epic-id>/` on
+  worktree for the epic at `<rig-path>/.worktrees/wts-<sanitized-epic-id>/` on
   branch `wts-<sanitized-epic-id>`, runs every child
   `software-dev-full-wts` flow inside that worktree, reviews and
   finalizes the accumulated branch, then merges it into the configured
@@ -158,7 +158,7 @@ po run software-dev-full --dry-run --issue-id sr-8yu.3 ...
 of an epic run it creates or reuses:
 
 ```text
-<rig-path>.wt-<sanitized-epic-id>/  on branch  wts-<sanitized-epic-id>
+<rig-path>/.worktrees/wts-<sanitized-epic-id>/  on branch  wts-<sanitized-epic-id>
 ```
 
 The epic bead is stamped with `metadata.work_dir`, `metadata.branch`,
@@ -166,7 +166,7 @@ and `metadata.merge_target_branch`. Each child `software-dev-full-wts`
 run receives the same values and stamps its own metadata with
 `work_dir`, `branch`, `merge_target_branch`, and `epic_id`. That durable
 metadata lets `po retry <child-id>` re-enter the existing epic worktree
-instead of creating a per-child `<rig>.wt-<child-id>/`.
+instead of creating a per-child `<rig>/.worktrees/wts-<child-id>/`.
 
 Child flows skip their standalone worktree setup and per-child merge
 when an epic-managed worktree is present. Their commits land directly

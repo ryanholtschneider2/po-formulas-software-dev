@@ -7,7 +7,7 @@ This monorepo ships **two installable packages side-by-side**:
 | Subdir | Distribution | What it provides |
 |---|---|---|
 | [`parent/`](./parent) | `po-formulas-software-dev` | The canonical pipeline: `software-dev-full` / `software-dev-fast` / `software-dev-edit`, `epic`, `epic-finalize`, `minimal-task`, `pre-pr-review`, `pr-writer`, `code-health-review`, `skill-evals`, `prompt`, `graph`, plus 18 role prompts. |
-| [`wts/`](./wts) | `po-formulas-software-dev-wts` | Worktree-aware fork. Same flow bodies as `parent/` with `*-wts` EP keys; standalone issue flows run in `git worktree`s at `<rig>.wt-<sanitized-id>/`, while `epic-wts` runs all children in one shared epic worktree at `<rig>.wt-<sanitized-epic-id>/` on branch `wts-<sanitized-epic-id>`. Adds `epic-finalize-wts` with an LLM spec-auditor and pytest coverage for the worktree machinery. |
+| [`wts/`](./wts) | `po-formulas-software-dev-wts` | Worktree-aware fork. Same flow bodies as `parent/` with `*-wts` EP keys; standalone issue flows run in `git worktree`s at `<rig>/.worktrees/wts-<sanitized-id>/`, while `epic-wts` runs all children in one shared epic worktree at `<rig>/.worktrees/wts-<sanitized-epic-id>/` on branch `wts-<sanitized-epic-id>`. Adds `epic-finalize-wts` with an LLM spec-auditor and pytest coverage for the worktree machinery. |
 
 Both packages register entry points under `po.formulas` / `po.deployments` / `po.doctor_checks` / `po.commands` and coexist in the same venv (the `-wts` suffix on every EP key prevents collisions).
 

@@ -1,8 +1,15 @@
 """Git-worktree isolation for software_dev_full_wts and friends.
 
-Each bead gets its own git worktree at `<rig_path>.wt-<sanitized-id>/`
-on a per-bead branch `wts-<sanitized-id>`. The agent's cwd is the
-worktree; concurrent siblings can't conflict on shared source files.
+Each bead gets its own git worktree at
+`<rig_path>/.worktrees/wts-<sanitized-id>/` on a per-bead branch
+`wts-<sanitized-id>`. The agent's cwd is the worktree; concurrent
+siblings can't conflict on shared source files.
+
+Nesting worktrees *inside* the main rig keeps the parent directory
+(often a multi-project workspace like `rocks_project/`) free of
+`<rig>.wt-<id>` sibling clutter. `setup_worktree` auto-adds
+`.worktrees/` to the main rig's `.git/info/exclude` so `git status`
+in main stays clean.
 
 Shared resources are symlinked back to the main rig so they stay
 authoritative across worktrees:
@@ -78,7 +85,7 @@ class WorktreePaths:
         slug = sanitize(raw_id)
         return cls(
             main_rig=main,
-            worktree=main.parent / f"{main.name}.wt-{slug}",
+            worktree=main / ".worktrees" / f"wts-{slug}",
             branch=f"wts-{slug}",
         )
 
@@ -149,11 +156,32 @@ def _worktree_exclude_file(main_rig: Path, branch: str) -> Path:
     own at `<main>/.git/worktrees/<wt-name>/info/exclude`; falls back to
     the main repo's `.git/info/exclude` if the per-worktree dir is
     missing for some reason (older git, weird setups)."""
-    wt_name = f"{main_rig.name}.wt-{branch.removeprefix('wts-')}"
-    per_wt = main_rig / ".git" / "worktrees" / wt_name / "info" / "exclude"
+    # `git worktree add <path>` records the worktree under
+    # `.git/worktrees/<basename(path)>/`; our worktree basename is the
+    # branch name (e.g. `wts-<slug>`).
+    per_wt = main_rig / ".git" / "worktrees" / branch / "info" / "exclude"
     if per_wt.parent.is_dir():
         return per_wt
     return main_rig / ".git" / "info" / "exclude"
+
+
+def _add_main_exclude(main_rig: Path, patterns: list[str]) -> None:
+    """Append patterns to the main rig's `.git/info/exclude`. Idempotent.
+    Used to hide `.worktrees/` (which holds nested worktrees) from the
+    main rig's `git status`."""
+    excl = main_rig / ".git" / "info" / "exclude"
+    excl.parent.mkdir(parents=True, exist_ok=True)
+    existing = excl.read_text() if excl.exists() else ""
+    lines = set(line.strip() for line in existing.splitlines() if line.strip())
+    new = [p for p in patterns if p not in lines]
+    if not new:
+        return
+    with excl.open("a", encoding="utf-8") as fh:
+        if existing and not existing.endswith("\n"):
+            fh.write("\n")
+        fh.write("# Added by po_formulas_wts.worktree — local-only.\n")
+        for p in new:
+            fh.write(f"{p}\n")
 
 
 def _add_exclude_rules(main_rig: Path, branch: str, patterns: list[str]) -> None:
@@ -193,6 +221,12 @@ def setup_worktree(
             f"rig at {paths.main_rig} is not a git repo; worktree isolation requires git. "
             "Pass --no-worktree (or set PO_WTS_NO_WORKTREE=1) to skip."
         )
+
+    # Worktree lives at `<main>/.worktrees/<wts-slug>/` — keep `.worktrees/`
+    # out of the main rig's `git status` (its own .git/info/exclude is per-
+    # working-tree, so this only affects the main rig).
+    _add_main_exclude(paths.main_rig, [".worktrees/"])
+    paths.worktree.parent.mkdir(parents=True, exist_ok=True)
 
     if paths.worktree.exists():
         logger.info("worktree: reusing existing %s", paths.worktree)

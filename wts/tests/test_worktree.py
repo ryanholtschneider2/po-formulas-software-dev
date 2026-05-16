@@ -81,7 +81,9 @@ def test_sanitize_replaces_unsafe_chars(raw: str, expected: str):
 def test_worktree_paths_for_issue(tmp_path: Path):
     paths = WorktreePaths.for_issue(tmp_path / "myrig", "x.1.2")
     assert paths.main_rig == (tmp_path / "myrig").resolve()
-    assert paths.worktree.name == "myrig.wt-x_1_2"
+    assert paths.worktree == (tmp_path / "myrig" / ".worktrees" / "wts-x_1_2").resolve()
+    assert paths.worktree.name == "wts-x_1_2"
+    assert paths.worktree.parent.name == ".worktrees"
     assert paths.branch == "wts-x_1_2"
 
 

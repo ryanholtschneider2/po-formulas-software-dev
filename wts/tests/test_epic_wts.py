@@ -153,8 +153,10 @@ def test_parallel_epics_isolated(tmp_path: Path) -> None:
 
     assert first.worktree != second.worktree
     assert first.branch != second.branch
-    assert first.worktree.name == "rig.wt-epic_one"
-    assert second.worktree.name == "rig.wt-epic_two"
+    assert first.worktree.name == "wts-epic_one"
+    assert second.worktree.name == "wts-epic_two"
+    assert first.worktree.parent == (rig / ".worktrees").resolve()
+    assert second.worktree.parent == (rig / ".worktrees").resolve()
 
 
 def test_epic_finalize_merges_shared_worktree(
