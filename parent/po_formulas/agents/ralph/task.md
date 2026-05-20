@@ -1,6 +1,6 @@
 You are the **cleaner** running the Ralph Wiggum pass on issue `{{issue_id}}` (ralph iter {{ralph_iter}}).
 
-**Paths.** Code lives in `{{pack_path}}` (`cd {{pack_path}}` before any edit / `git add` / `git commit`). The bead + run_dir live under `{{rig_path}}` — write the verdict artifact there. When `{{pack_path}}` equals `{{rig_path}}` the two are the same directory.
+**Paths.** Code lives in `{{pack_path}}` (`cd {{pack_path}}` before any edit / `git add` / `git commit`). The bead + run_dir live under `{{rig_path}}` — the verdict is stamped on your bead via `bd update --metadata`. When `{{pack_path}}` equals `{{rig_path}}` the two are the same directory.
 {{gate_failures_block}}
 Ask ONCE: is there a **meaningfully** cleaner way to implement this? Re-read the final diff (`git -C {{pack_path}} log --oneline -20` and the build diff at `{{run_dir}}/build-iter-*.diff`) and the decision log. Cleaner = simpler, fewer moving parts, closer to existing patterns — not stylistic nits.
 
@@ -14,21 +14,16 @@ If yes: refactor inside `{{pack_path}}`, commit with **scoped `git add <path>` f
 
 Then reserve the files you'll edit via `mcp-agent-mail file_reservation_paths` with `agent_name="{{issue_id}}-cleaner"` BEFORE editing. If denied, mail the holder or back off/retry. Release via `mcp-agent-mail release_file_reservations` after commit. Skip both registration and reservation entirely on the no-refactor path.
 
-Then write the verdict artifact:
+Then stamp the verdict on your bead:
 
 ```bash
-mkdir -p {{run_dir}}/verdicts
-cat > {{run_dir}}/verdicts/ralph-iter-{{ralph_iter}}.json <<'EOF'
-{"ralph_found_improvement": false}
-EOF
+bd update {{role_step_bead_id}} --metadata '{"po.ralph": {"ralph_found_improvement": false}}'
 ```
 
 On refactor:
 
 ```bash
-cat > {{run_dir}}/verdicts/ralph-iter-{{ralph_iter}}.json <<'EOF'
-{"ralph_found_improvement": true, "summary": "extracted X helper; dropped Y layer"}
-EOF
+bd update {{role_step_bead_id}} --metadata '{"po.ralph": {"ralph_found_improvement": true, "summary": "extracted X helper; dropped Y layer"}}'
 ```
 
 The flow re-enters this step up to the ralph cap as long as you keep finding meaningful improvements.

@@ -183,7 +183,7 @@ def _agent_step_task(
 
     `run_dir` defaults to `<rig>/.planning/software-dev-full/<seed>/` so
     every agent_step call within one software_dev_full run shares a
-    canonical run-dir (verdicts/, role-sessions.json, transcripts).
+    canonical run-dir (role-sessions.json, transcripts, decision-log.md).
     The TUI / `po artifacts` / `po watch` find this via the seed bead's
     `po.run_dir` metadata that agent_step stamps.
     """
@@ -227,25 +227,19 @@ _VALID_COMPLEXITIES = ("trivial", "simple", "moderate", "complex")
 
 
 def _read_triage_flags(rig_path: Path, seed_id: str) -> dict[str, Any]:
-    """Read `<rig>/.planning/software-dev-full/<seed>/verdicts/triage.json`.
+    """Read `po.triage` metadata from the triager iter bead.
 
     Returns the JSON dict with booleans coerced (str/int → bool) and
     `complexity` preserved as a string. Default complexity = 'complex'
     (most rigorous) if unset or invalid — bias toward rigor.
     """
-    path = (
-        rig_path
-        / ".planning"
-        / "software-dev-full"
-        / seed_id
-        / "verdicts"
-        / "triage.json"
-    )
-    if not path.is_file():
-        return {"complexity": "complex"}
     try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
+        from prefect_orchestration.parsing import read_bead_verdict
+
+        data = read_bead_verdict(
+            f"{seed_id}.triage.iter1", "triage", rig_path=rig_path
+        )
+    except (FileNotFoundError, KeyError, ValueError):
         return {"complexity": "complex"}
     if not isinstance(data, dict):
         return {"complexity": "complex"}
@@ -386,26 +380,44 @@ def _record_flow_outcome(
     failure can never mask the original flow exception.
     """
     try:
-        verdicts_dir = run_dir / "verdicts"
         work_landed = _compute_work_landed(run_dir)
         partial_summary = _last_iter_summary(run_dir / "decision-log.md")
 
-        # Identify last role/iter via verdicts/<role>.json mtimes
-        # (newest = the role that crashed or the one that just landed).
+        # Identify the most recently-touched iter bead under the seed.
+        # Pattern: `<seed>.<step>.iter<N>`. Replaces the legacy scan over
+        # `<run_dir>/verdicts/*.json` (which no longer exists post-migration).
         terminal_role: str | None = None
         terminal_iter: int | None = None
-        if verdicts_dir.is_dir():
-            verdict_files = sorted(
-                verdicts_dir.glob("*.json"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
+        try:
+            qr = subprocess.run(
+                ["bd", "list", "--parent", seed_id, "--all", "--json"],
+                cwd=rig_path,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
             )
-            if verdict_files:
-                stem = verdict_files[0].stem
-                m = re.match(r"^(.*?)(?:-iter-(\d+))?$", stem)
-                if m:
-                    terminal_role = m.group(1) or None
-                    terminal_iter = int(m.group(2)) if m.group(2) else None
+            if qr.returncode == 0 and qr.stdout.strip():
+                rows = json.loads(qr.stdout)
+                if isinstance(rows, list):
+                    iter_beads = [
+                        b for b in rows
+                        if isinstance(b, dict)
+                        and re.match(rf"^{re.escape(seed_id)}\.(.+?)\.iter(\d+)$", str(b.get("id", "")))
+                    ]
+                    iter_beads.sort(
+                        key=lambda b: str(b.get("updated_at", "")), reverse=True,
+                    )
+                    if iter_beads:
+                        m = re.match(
+                            rf"^{re.escape(seed_id)}\.(.+?)\.iter(\d+)$",
+                            str(iter_beads[0]["id"]),
+                        )
+                        if m:
+                            terminal_role = m.group(1) or None
+                            terminal_iter = int(m.group(2))
+        except Exception:  # noqa: BLE001
+            pass
 
         # bd_seed_closed via `bd show <seed>` JSON. Timeout-capped so a
         # wedged bd backend (dolt-server unreachable) doesn't cascade.

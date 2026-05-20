@@ -39,7 +39,7 @@ If you picked `trivial`:
 1. Make the edit yourself. Use Edit tool to change the file(s).
 2. `cd {{pack_path}}` then `git add <files>` + `git commit -m "[{{seed_id}}] <one-line>"`.
 3. Verify the change makes sense (re-read the diff with `git -C {{pack_path}} diff HEAD~1`).
-4. Skip the regular triage.json verdict file — just write `triage.json` with `complexity=trivial` flag set so the flow body knows you handled it.
+4. Stamp the bead-metadata verdict (next section) with `complexity=trivial` so the flow body knows you handled it.
 
 If at any point you realize this isn't actually trivial (the change is bigger than expected, or you can't make the edit cleanly), STOP, set `complexity=simple` or `moderate`, and let the regular pipeline handle it.
 
@@ -66,20 +66,17 @@ Write a one-paragraph summary + flags to `{{run_dir}}/triage.md`:
 <bullet list>
 ```
 
-# Write the verdict file
+# Stamp the verdict on your bead
 
-The flow body reads this to decide what runs. Write JSON booleans (`true`/`false`, lowercase) — not strings, not Python `True`/`False`:
+The flow body reads bead metadata key `po.triage` to decide what runs. Write JSON booleans (`true`/`false`, lowercase). `bd update --metadata` does a per-key upsert — it preserves other metadata (`po.run_dir`, `po.rig_path`) untouched.
 
 ```bash
-mkdir -p {{run_dir}}/verdicts
-cat > {{run_dir}}/verdicts/triage.json <<'EOF'
-{"has_ui": false, "has_backend": true, "needs_migration": false, "is_docs_only": false, "complexity": "moderate"}
-EOF
+bd update {{role_step_bead_id}} --metadata '{"po.triage": {"has_ui": false, "has_backend": true, "needs_migration": false, "is_docs_only": false, "complexity": "moderate"}}'
 ```
 
-Verify it exists:
+Verify it landed:
 ```bash
-ls {{run_dir}}/verdicts/triage.json && cat {{run_dir}}/verdicts/triage.json
+bd show {{role_step_bead_id}} --json | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)[0]['metadata'].get('po.triage'), indent=2))"
 ```
 
 # Done — close your bead

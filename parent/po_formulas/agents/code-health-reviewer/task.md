@@ -93,23 +93,21 @@ Write `{{run_dir}}/proposals.json`. **Strict schema** — the orchestrator parse
 
 Aim for **5–25 findings** per run. Fewer than 5 means you didn't look hard enough; more than 25 means you're filing trivia. If you have 40 candidate findings, merge the related ones into umbrella findings ("Consolidate 7 oversized modules in cdr/db/") rather than filing 40 individual beads.
 
-# Write the verdict file
+# Stamp the verdict on your bead
 
 ```bash
-mkdir -p {{run_dir}}/verdicts
-cat > {{run_dir}}/verdicts/code-health-review.json <<EOF
-{"verdict": "complete", "findings_count": <int>, "summary": "<copy of proposals.json summary>"}
-EOF
+bd update {{role_step_bead_id}} --metadata '{"po.code_health": {"verdict": "complete", "findings_count": <int>, "summary": "<copy of proposals.json summary>"}}'
 ```
 
 Verify:
 
 ```bash
-ls {{run_dir}}/proposals.json {{run_dir}}/verdicts/code-health-review.json
+ls {{run_dir}}/proposals.json
 python3 -c "import json; d=json.load(open('{{run_dir}}/proposals.json')); assert d.get('findings'); print('OK', len(d['findings']))"
+bd show {{role_step_bead_id}} --json | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)[0]['metadata'].get('po.code_health'), indent=2))"
 ```
 
-If the schema doesn't validate, fix the file before closing — the orchestrator will fail loudly otherwise.
+If the schema doesn't validate, fix the file before closing — the orchestrator will fail loudly otherwise. (Note: `proposals.json` is a separate artifact, not a verdict — it stays on disk as the canonical finding list.)
 
 # Done — close your bead
 

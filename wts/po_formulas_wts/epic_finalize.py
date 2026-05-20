@@ -10,7 +10,7 @@ Steps (in order):
   5. Real-env smoke walkthrough (structured gate). Invokes the rig's
      Playwright walkthrough, parses `report.md` Verdict, stamps
      `metadata.smoke = passed/failed/skipped` on the epic, writes
-     `verdicts/smoke.json`. Aborts finalize on FAIL.
+     bead metadata key `po.smoke` on the epic. Aborts finalize on FAIL.
   6. Optional smoke_cmd (legacy shell-blob) via subprocess.
   7. Demo video — ONE per epic, invoked against the smoke artifacts.
      Lands at `research/<branch-slug>/demo-<utc>/demo_final.mp4`.
@@ -34,7 +34,7 @@ from typing import Any
 from prefect import flow, get_run_logger
 
 from prefect_orchestration.beads_meta import close_issue, list_epic_children
-from prefect_orchestration.parsing import read_verdict
+from prefect_orchestration.parsing import read_bead_verdict
 
 from po_formulas_wts.software_dev import _agent_dir, _agent_step_task, _task_md
 from po_formulas_wts.worktree import merge_worktree
@@ -59,6 +59,26 @@ def _stamp_metadata(epic_id: str, key: str, value: str, rig_path: Path) -> None:
     try:
         subprocess.run(
             ["bd", "update", epic_id, "--set-metadata", f"{key}={value}"],
+            cwd=str(rig_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def _stamp_metadata_object(
+    bead_id: str, key: str, value: Any, rig_path: Path
+) -> None:
+    """Best-effort `bd update --metadata '{<key>: <value>}'` (per-key upsert).
+
+    Use for structured payloads. Other metadata keys on the bead are
+    preserved. Logs on failure but doesn't raise.
+    """
+    try:
+        subprocess.run(
+            ["bd", "update", bead_id, "--metadata", json.dumps({key: value})],
             cwd=str(rig_path),
             capture_output=True,
             text=True,
@@ -386,7 +406,7 @@ def epic_finalize(
 
     if resolved_spec is not None and not dry_run:
         logger.info("spec-audit: auditing against %s", resolved_spec)
-        _agent_step_task(
+        result = _agent_step_task(
             agent_dir=_agent_dir("spec-auditor"),
             task=_task_md("spec-auditor"),
             seed_id=epic_id,
@@ -402,12 +422,19 @@ def epic_finalize(
             },
             dry_run=False,
         )
-        verdict_path = run_dir / "verdicts" / "spec-audit.json"
         try:
-            verdict = read_verdict(run_dir, "spec-audit")
+            verdict = read_bead_verdict(
+                result.bead_id, "spec_audit", rig_path=rig_path_p
+            )
         except Exception as exc:
-            logger.warning("spec-audit: failed to read verdict at %s: %s", verdict_path, exc)
+            logger.warning(
+                "spec-audit: failed to read verdict from bead %s: %s",
+                result.bead_id, exc,
+            )
             verdict = {}
+        # Mirror onto the epic bead so pr-writer reads it via `bd show <epic>`.
+        if verdict:
+            _stamp_metadata_object(epic_id, "po.spec_audit", verdict, rig_path_p)
         if verdict.get("verdict") == "FAILED":
             spec_gaps = list(verdict.get("gaps") or [])
             failures.append(
@@ -450,12 +477,9 @@ def epic_finalize(
             smoke_result["verdict"],
             smoke_result["out_dir"],
         )
-        (run_dir / "verdicts").mkdir(parents=True, exist_ok=True)
-        (run_dir / "verdicts" / "smoke.json").write_text(
-            json.dumps(smoke_result, indent=2) + "\n"
-        )
         verdict_lower = smoke_result["verdict"].lower()
         _stamp_metadata(epic_id, "smoke", verdict_lower, rig_path_p)
+        _stamp_metadata_object(epic_id, "po.smoke", smoke_result, rig_path_p)
         if smoke_result["verdict"] == "FAIL":
             failures.append(
                 f"smoke-walkthrough FAIL ({smoke_result.get('summary', '')})"
@@ -548,11 +572,8 @@ def epic_finalize(
                 ci_result["verdict"],
                 ci_result.get("summary", ""),
             )
-            (run_dir / "verdicts").mkdir(parents=True, exist_ok=True)
-            (run_dir / "verdicts" / "ci.json").write_text(
-                json.dumps(ci_result, indent=2) + "\n"
-            )
             _stamp_metadata(epic_id, "ci", ci_result["verdict"], rig_path_p)
+            _stamp_metadata_object(epic_id, "po.ci", ci_result, rig_path_p)
             if ci_result["verdict"] in {"failed", "timeout"}:
                 failures.append(
                     f"remote-ci {ci_result['verdict']}: {ci_result.get('summary', '')}"

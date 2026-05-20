@@ -9,18 +9,20 @@ overhead per principle §4.
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 from pathlib import Path
 
 from prefect_orchestration.run_lookup import resolve_run_dir, RunDirNotFound
 
 
 def summarize_verdicts(issue_id: str) -> None:
-    """Print a one-line summary per `verdicts/*.json` for an issue's run dir.
+    """Print a one-line summary per `po.*` metadata key across an issue's iter beads.
 
-    Resolves the run dir via bd metadata (po.rig_path / po.run_dir) and
-    walks `<run_dir>/verdicts/*.json` in name order, printing
-    `<step> <verdict> <reason-first-line>` for each. Non-fatal if the
-    `verdicts/` directory is absent or empty — prints a clear hint.
+    Walks every iter bead under the seed (`<seed>.<step>.iter<N>`) and
+    prints one line per `po.<role>` metadata key found, sorted by step
+    + iter index. Resolves the seed's rig_path via bd metadata so the
+    `bd` shellout runs in the right rig.
     """
     try:
         loc = resolve_run_dir(issue_id)
@@ -28,26 +30,55 @@ def summarize_verdicts(issue_id: str) -> None:
         print(f"error: {exc}")
         raise SystemExit(2) from exc
 
-    vdir = loc.run_dir / "verdicts"
-    if not vdir.is_dir():
-        print(f"no verdicts/ under {loc.run_dir}")
+    rig_path = loc.rig_path
+    proc = subprocess.run(
+        ["bd", "list", "--parent", issue_id, "--all", "--json"],
+        cwd=str(rig_path),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        print(f"no iter beads found for {issue_id} under {rig_path}")
         return
 
-    files = sorted(vdir.glob("*.json"))
-    if not files:
-        print(f"no verdict files under {vdir}")
+    try:
+        rows = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        print(f"bd list returned unparseable JSON: {exc}")
         return
 
-    for path in files:
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, ValueError) as exc:
-            print(f"  {path.stem:24s}  (unreadable: {exc})")
+    iter_pat = re.compile(rf"^{re.escape(issue_id)}\.(.+?)\.iter(\d+)$")
+    items = []
+    for row in rows or []:
+        if not isinstance(row, dict):
             continue
-        verdict = str(data.get("verdict", "?"))
-        reason_raw = data.get("reason") or data.get("summary") or ""
-        first = reason_raw.splitlines()[0] if reason_raw else ""
-        print(f"  {path.stem:24s}  {verdict:12s}  {first}")
+        m = iter_pat.match(str(row.get("id", "")))
+        if not m:
+            continue
+        metadata = row.get("metadata") or {}
+        for key, value in metadata.items():
+            if not str(key).startswith("po."):
+                continue
+            if key in {"po.run_dir", "po.rig_path"}:
+                continue
+            items.append((m.group(1), int(m.group(2)), key, value))
+
+    if not items:
+        print(f"no po.* verdict metadata found on iter beads of {issue_id}")
+        return
+
+    items.sort(key=lambda t: (t[0], t[1], t[2]))
+    for step, iter_n, key, value in items:
+        if isinstance(value, dict):
+            verdict = str(value.get("verdict") or value.get("passed") or value.get("ralph_found_improvement") or "?")
+            reason = value.get("reason") or value.get("summary") or ""
+            first = str(reason).splitlines()[0] if reason else ""
+        else:
+            verdict = str(value)
+            first = ""
+        label = f"{step}-iter-{iter_n} {key.removeprefix('po.')}"
+        print(f"  {label:38s}  {verdict:12s}  {first}")
 
 
 def planning_init(kind: str, slug: str, title: str | None = None) -> None:

@@ -3,7 +3,8 @@
 Drafts + publishes a PR (or fast-forward direct-push) for a single bead
 or an epic's aggregated children. Designed to run as the final step of
 `epic_wts` after pre-pr-review + epic-finalize have left clean gate
-verdicts in `<run_dir>/verdicts/*.json`.
+verdicts on the epic bead's metadata (`po.smoke`, `po.ci`,
+`po.demo_video`, `po.spec_audit`).
 
 Source assets (ported from `software-dev-pack-wts/`, the gas-city pack):
 
@@ -24,8 +25,9 @@ Gas-city features that don't translate (and don't need to):
 
 Idempotency: the agent's `gh pr edit` vs `gh pr create` branch handles
 the "PR already exists" case (see prompt.md § Idempotency state machine).
-The flow itself is idempotent by virtue of writing a verdict file keyed
-on epic_id / bead_id under `<run_dir>/verdicts/`.
+The flow itself is idempotent because re-runs hit agent_step's cache
+fast-path on the closed iter bead and return the verdict from bd
+metadata.
 
 Refs: prefect-orchestration-3pt.
 """
@@ -33,12 +35,13 @@ Refs: prefect-orchestration-3pt.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
 from prefect import flow, get_run_logger
 
-from prefect_orchestration.parsing import read_verdict
+from prefect_orchestration.parsing import read_bead_verdict
 
 from po_formulas_wts.software_dev import _agent_dir, _agent_step_task, _task_md
 
@@ -87,7 +90,7 @@ def pr_writer(
 
     Returns: {"verdict": "PASS|HALT", "pr": int|None, "url": str|None,
               "branch": str|None, "mode": "create|edit|none",
-              "scope_id": str, "verdict_path": str}.
+              "scope_id": str, "bead_id": str}.
     """
     logger = get_run_logger()
     if (bead_id is None) == (epic_id is None):
@@ -95,25 +98,26 @@ def pr_writer(
             "verdict": "HALT",
             "reason": "exactly one of bead_id / epic_id required",
             "pr": None, "url": None, "branch": branch, "mode": "none",
-            "scope_id": "", "verdict_path": "",
+            "scope_id": "", "bead_id": "",
         }
     if not rig_path:
         return {
             "verdict": "HALT",
             "reason": "rig_path required",
             "pr": None, "url": None, "branch": branch, "mode": "none",
-            "scope_id": "", "verdict_path": "",
+            "scope_id": "", "bead_id": "",
         }
 
     scope_id: str = bead_id or epic_id  # type: ignore[assignment]
     rig_path_p = Path(rig_path).expanduser().resolve()
     run_dir = _resolve_run_dir(rig_path_p, scope_id)
-    (run_dir / "verdicts").mkdir(parents=True, exist_ok=True)
 
     logger.info(
         "pr_writer: scope=%s rig=%s run_dir=%s merge_target=%s",
         scope_id, rig, run_dir, merge_target,
     )
+
+    iter_bead_id = f"{scope_id}.pr-writer.iter1"
 
     if dry_run:
         stub = {
@@ -123,19 +127,27 @@ def pr_writer(
             "branch": branch,
             "mode": "none",
             "scope_id": scope_id,
-            "verdict_path": str(run_dir / "verdicts" / "pr-writer.json"),
+            "bead_id": iter_bead_id,
             "dry_run": True,
         }
-        (run_dir / "verdicts" / "pr-writer.json").write_text(
-            json.dumps(stub, indent=2) + "\n"
+        # Stamp the stub onto the iter bead so downstream consumers see
+        # the same shape they would in a real run.
+        subprocess.run(
+            ["bd", "update", iter_bead_id, "--metadata",
+             json.dumps({"po.pr_writer": stub})],
+            cwd=str(rig_path_p),
+            capture_output=True,
+            text=True,
+            check=False,
         )
         return stub
 
-    # Hand control to the pr-writer agent. The agent reads the verdict
-    # files + diff + child summaries, composes a PR body against
-    # pr-format-template.md (baked alongside prompt.md), and dispatches
-    # via gh. It writes verdicts/pr-writer.json on exit.
-    _agent_step_task(
+    # Hand control to the pr-writer agent. The agent reads upstream
+    # verdicts from the epic's bd metadata + diff + child summaries,
+    # composes a PR body against pr-format-template.md (baked alongside
+    # prompt.md), and dispatches via gh. It stamps `po.pr_writer` onto
+    # its iter bead on exit.
+    result = _agent_step_task(
         agent_dir=_agent_dir("pr-writer"),
         task=_task_md("pr-writer"),
         seed_id=scope_id,
@@ -155,13 +167,15 @@ def pr_writer(
         dry_run=False,
     )
 
-    # Read the agent's verdict.
-    verdict_path = run_dir / "verdicts" / "pr-writer.json"
+    # Read the agent's verdict from bead metadata.
     try:
-        verdict = read_verdict(run_dir, "pr-writer")
+        verdict = read_bead_verdict(
+            result.bead_id, "pr_writer", rig_path=rig_path_p
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "pr_writer: failed to read verdict at %s: %s", verdict_path, exc
+            "pr_writer: failed to read verdict from bead %s: %s",
+            result.bead_id, exc,
         )
         verdict = {}
     if not isinstance(verdict, dict):
@@ -175,7 +189,7 @@ def pr_writer(
         "branch": verdict.get("branch") or branch,
         "mode": verdict.get("mode") or "none",
         "scope_id": scope_id,
-        "verdict_path": str(verdict_path),
+        "bead_id": result.bead_id,
     }
     if out["verdict"] not in {"PASS", "HALT"}:
         out["verdict"] = "HALT"

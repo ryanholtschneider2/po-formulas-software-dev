@@ -13,24 +13,23 @@ Treat any pre-existing failure recorded in `{{run_dir}}/baseline.txt` as **NOT a
 
 # REQUIRED FINAL STEP — DO NOT SKIP
 
-Your turn is **not complete** until the verdict file exists on disk. The orchestrator reads it to decide between (a) closing the bead and (b) routing the failures back to ralph for a fix-up turn. Run this bash command verbatim as the **last action** before returning, then verify with `ls` + `cat`:
+Your turn is **not complete** until the verdict is stamped on your bead. The orchestrator reads bead metadata key `po.full_test_gate` to decide between (a) closing the seed and (b) routing failures back to ralph for a fix-up turn. Run the right bash command verbatim as the **last action** before returning, then verify with `bd show`:
 
 On a clean pass:
 
 ```bash
-mkdir -p {{run_dir}}/verdicts
-cat > {{run_dir}}/verdicts/full-test-gate.json <<'EOF'
-{"passed": true, "summary": "all enabled layers green vs baseline"}
-EOF
+bd update {{role_step_bead_id}} --metadata '{"po.full_test_gate": {"passed": true, "summary": "all enabled layers green vs baseline"}}'
 ```
 
 On failure (one or more newly-failing tests):
 
 ```bash
-mkdir -p {{run_dir}}/verdicts
-cat > {{run_dir}}/verdicts/full-test-gate.json <<'EOF'
-{"passed": false, "failures": ["tests/test_x.py::test_a", "tests/test_y.py::test_b"], "summary": "two newly-failing tests after iter loop"}
-EOF
+bd update {{role_step_bead_id}} --metadata '{"po.full_test_gate": {"passed": false, "failures": ["tests/test_x.py::test_a", "tests/test_y.py::test_b"], "summary": "two newly-failing tests after iter loop"}}'
+```
+
+Verify it landed:
+```bash
+bd show {{role_step_bead_id}} --json | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)[0]['metadata'].get('po.full_test_gate'), indent=2))"
 ```
 
 Always populate `failures` with the **newly** failing test node IDs (not the baseline-already-broken ones). The ralph fix-up turn reads this list verbatim.

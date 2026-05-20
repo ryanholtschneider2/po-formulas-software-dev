@@ -69,9 +69,9 @@ def minimal_task(
     if claim and not dry_run:
         claim_issue(issue_id, assignee=f"po-{os.getpid()}", rig_path=rig_path_p)
 
-    # 1. Triage — same agent + task as software_dev_full so verdicts
-    #    written to verdicts/triage.json stay compatible with `po`
-    #    artifacts/watch/logs.
+    # 1. Triage — same agent + task as software_dev_full so the
+    #    `po.triage` metadata stamped on the iter bead stays
+    #    compatible with `po artifacts/watch/logs`.
     agent_step(
         agent_dir=_AGENTS_DIR / "triager",
         task=_AGENTS_DIR / "triager" / "task.md",

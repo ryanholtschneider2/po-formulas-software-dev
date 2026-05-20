@@ -23,13 +23,13 @@ fi
 
 3. **Write your findings** to `{{run_dir}}/spec-audit.md`. One section per capability you tested. Mark each as `OK`, `GAP`, or `BROKEN`. Be specific about WHAT is wrong, with a code reference.
 
-4. **Write a structured verdict** to `{{run_dir}}/verdicts/spec-audit.json` with this shape:
-   ```json
-   {"verdict": "PASSED", "gaps": []}
+4. **Stamp a structured verdict** on your bead at metadata key `po.spec_audit`:
+   ```bash
+   bd update {{role_step_bead_id}} --metadata '{"po.spec_audit": {"verdict": "PASSED", "gaps": []}}'
    ```
    or, when any capability fails:
-   ```json
-   {"verdict": "FAILED", "gaps": ["variadic done not implemented", "edit --rm-tag missing", "GET /metrics returns HTML not prometheus"]}
+   ```bash
+   bd update {{role_step_bead_id}} --metadata '{"po.spec_audit": {"verdict": "FAILED", "gaps": ["variadic done not implemented", "edit --rm-tag missing", "GET /metrics returns HTML not prometheus"]}}'
    ```
 
 # Tone

@@ -324,7 +324,8 @@ def code_health_review(
     logger.info("code-health: seed bead = %s", seed_id)
     claim_issue(seed_id, assignee=f"po-{os.getpid()}", rig_path=rig_path_p)
 
-    # 2. Run the reviewer agent. Writes proposals.json + verdicts/code-health-review.json.
+    # 2. Run the reviewer agent. Writes proposals.json on disk and
+    #    stamps `po.code_health` on its iter bead.
     result = agent_step(
         agent_dir=_AGENTS_DIR / "code-health-reviewer",
         task=_AGENTS_DIR / "code-health-reviewer" / "task.md",

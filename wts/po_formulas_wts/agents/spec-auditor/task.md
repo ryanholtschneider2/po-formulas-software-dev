@@ -18,14 +18,14 @@ Process:
    - **BROKEN** — `todo edit --add-tag`: spec § "Core item ops" lists `--add-tag`. Invoking `todo edit 1 --add-tag foo` errors with `Unknown option`. Code reference: src/todo_cli/cli.py:107.
    ```
 
-5. Write a structured verdict to `{{run_dir}}/verdicts/spec-audit.json`:
+5. Stamp the structured verdict on your bead:
 
-   ```json
-   {"verdict": "PASSED", "gaps": []}
+   ```bash
+   bd update {{role_step_bead_id}} --metadata '{"po.spec_audit": {"verdict": "PASSED", "gaps": []}}'
    ```
    or
-   ```json
-   {"verdict": "FAILED", "gaps": ["one-line summary per gap, exactly matching the GAP/BROKEN bullets above"]}
+   ```bash
+   bd update {{role_step_bead_id}} --metadata '{"po.spec_audit": {"verdict": "FAILED", "gaps": ["one-line summary per gap, exactly matching the GAP/BROKEN bullets above"]}}'
    ```
 
 6. Close your bead with `bd close {{seed_id}} --reason "spec-audit complete: <PASSED|FAILED>, <N> gaps"`.
