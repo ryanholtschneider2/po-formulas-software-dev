@@ -159,17 +159,45 @@ def _worktree_exclude_file(main_rig: Path, branch: str) -> Path:
     # `git worktree add <path>` records the worktree under
     # `.git/worktrees/<basename(path)>/`; our worktree basename is the
     # branch name (e.g. `wts-<slug>`).
-    per_wt = main_rig / ".git" / "worktrees" / branch / "info" / "exclude"
+    gitdir = _resolve_gitdir(main_rig)
+    # When main_rig is itself a worktree, `gitdir` already points to
+    # `<real-main>/.git/worktrees/<wt-name>/`. Per-branch worktrees
+    # we're creating live alongside it under `<real-main>/.git/worktrees/`.
+    common_dir = gitdir.parent if gitdir.parent.name == "worktrees" else gitdir / "worktrees"
+    per_wt = common_dir / branch / "info" / "exclude"
     if per_wt.parent.is_dir():
         return per_wt
-    return main_rig / ".git" / "info" / "exclude"
+    return gitdir / "info" / "exclude"
+
+
+def _resolve_gitdir(main_rig: Path) -> Path:
+    """Return the real git dir for `main_rig`. Handles the case where
+    `main_rig` is itself a worktree (`.git` is a file pointing to the
+    per-worktree gitdir under the main repo)."""
+    dot_git = main_rig / ".git"
+    if dot_git.is_dir():
+        return dot_git
+    if dot_git.is_file():
+        # Worktree: `.git` is a text file `gitdir: <abspath>`.
+        contents = dot_git.read_text(encoding="utf-8").strip()
+        prefix = "gitdir:"
+        if contents.startswith(prefix):
+            gitdir = Path(contents[len(prefix):].strip())
+            if not gitdir.is_absolute():
+                gitdir = (main_rig / gitdir).resolve()
+            return gitdir
+    raise RuntimeError(
+        f"{main_rig} has no resolvable .git (neither dir nor worktree pointer)"
+    )
 
 
 def _add_main_exclude(main_rig: Path, patterns: list[str]) -> None:
-    """Append patterns to the main rig's `.git/info/exclude`. Idempotent.
+    """Append patterns to the main rig's `info/exclude`. Idempotent.
     Used to hide `.worktrees/` (which holds nested worktrees) from the
-    main rig's `git status`."""
-    excl = main_rig / ".git" / "info" / "exclude"
+    main rig's `git status`. Handles worktree rigs by resolving `.git`
+    to the real gitdir."""
+    gitdir = _resolve_gitdir(main_rig)
+    excl = gitdir / "info" / "exclude"
     excl.parent.mkdir(parents=True, exist_ok=True)
     existing = excl.read_text() if excl.exists() else ""
     lines = set(line.strip() for line in existing.splitlines() if line.strip())
