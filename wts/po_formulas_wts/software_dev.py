@@ -502,6 +502,70 @@ def _record_flow_outcome(
         pass
 
 
+# ─────────────────────── PR Sheriff handoff (ADE mode) ───────────────
+
+
+def _sheriff_handoff_enabled(main_rig: Path) -> bool:
+    """True when this rig hands finished features to the PR Sheriff instead of
+    merging them straight to main.
+
+    Enabled in ADE mode — a rig with `.ade/settings.toml` — or explicitly via
+    `PO_SHERIFF_HANDOFF=1`. Off otherwise, so non-ADE wts users keep the
+    existing merge-back-to-main behaviour.
+    """
+    if os.environ.get("PO_SHERIFF_HANDOFF"):
+        return True
+    return (main_rig / ".ade" / "settings.toml").is_file()
+
+
+def _handoff_to_sheriff(main_rig: Path, issue_id: str, logger: Any) -> dict[str, object]:
+    """Finalize a feature by handing it to the PR Sheriff (CI gate → merge).
+
+    Pushes the bead's `wts-<id>` branch, labels the feature `review` (board
+    moves it to the Review column), and fires `po run pr-sheriff` detached. The
+    Sheriff runs CI and decides merge / fix-merge / needs-human / needs-rewrite,
+    then merges + closes — so we do NOT merge to main or close here.
+    """
+    from po_formulas_wts.worktree import push_worktree_branch
+
+    push = push_worktree_branch(main_rig, issue_id)
+
+    # Board signal: leave Working, enter Review.
+    subprocess.run(
+        ["bd", "update", issue_id, "--add-label", "review"],
+        cwd=str(main_rig),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # Trigger the Sheriff, detached — the flow ends; the Sheriff runs on its own.
+    try:
+        subprocess.Popen(  # noqa: S603
+            [
+                "po", "run", "pr-sheriff",
+                "--workspace-dir", str(main_rig),
+                "--feature-id", issue_id,
+            ],
+            cwd=str(main_rig),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        triggered = True
+    except OSError:
+        logger.exception("pr-sheriff trigger failed for %s", issue_id)
+        triggered = False
+
+    logger.info(
+        "sheriff-handoff: %s pushed=%s review-labelled, sheriff triggered=%s",
+        push.get("branch"),
+        push.get("pushed"),
+        triggered,
+    )
+    return {"branch": push.get("branch"), "pushed": push.get("pushed"), "sheriff_triggered": triggered}
+
+
 # ─────────────────────── the flow ────────────────────────────────────
 
 
@@ -1057,30 +1121,45 @@ def software_dev_full(
                 dry_run=dry_run,
             )
 
-        # Merge the worktree back into the main rig's current branch
-        # BEFORE closing the bead so the close-keyword reflects post-merge
-        # state. Failures here leave the worktree for the operator to
-        # resolve and re-run; the seed bead stays open.
+        # Finalize. ADE mode (sheriff handoff): push the branch + hand off to
+        # the PR Sheriff for the CI-gated merge — do NOT merge to main or close
+        # here (the Sheriff does that after CI). Standalone wts mode: merge the
+        # worktree back into main, then close. Epic-managed worktrees finalize
+        # at the epic level either way.
         merged_into = None
-        if worktree_enabled:
-            from po_formulas_wts.worktree import merge_worktree
+        sheriff = None
+        handoff = (
+            worktree_enabled
+            and not epic_managed_worktree
+            and not dry_run
+            and _sheriff_handoff_enabled(main_rig_path_p)
+        )
+        if handoff:
+            sheriff = _handoff_to_sheriff(main_rig_path_p, issue_id, logger)
+        else:
+            # Merge the worktree back into the main rig's current branch BEFORE
+            # closing the bead so the close-keyword reflects post-merge state.
+            # Failures here leave the worktree for the operator to resolve and
+            # re-run; the seed bead stays open.
+            if worktree_enabled:
+                from po_formulas_wts.worktree import merge_worktree
 
-            try:
-                merged_into = merge_worktree(main_rig_path_p, issue_id, cleanup=True)
-                logger.info("worktree: merged into %s", merged_into)
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "worktree: merge failed (%s); leaving worktree at "
-                    "<rig>/.worktrees/wts-<id> for resolution. Re-run after fixing.",
-                    exc,
+                try:
+                    merged_into = merge_worktree(main_rig_path_p, issue_id, cleanup=True)
+                    logger.info("worktree: merged into %s", merged_into)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "worktree: merge failed (%s); leaving worktree at "
+                        "<rig>/.worktrees/wts-<id> for resolution. Re-run after fixing.",
+                        exc,
+                    )
+                    raise
+
+            # Close the seed.
+            if claim and not dry_run:
+                close_issue(
+                    issue_id, notes="po simple-mode complete", rig_path=main_rig_path_p
                 )
-                raise
-
-        # Close the seed.
-        if claim and not dry_run:
-            close_issue(
-                issue_id, notes="po simple-mode complete", rig_path=main_rig_path_p
-            )
 
         return {
             "status": "completed",
@@ -1094,6 +1173,7 @@ def software_dev_full(
             "is_docs_only": is_docs_only,
             "has_ui": has_ui,
             "worktree_merged_into": merged_into,
+            "sheriff_handoff": sheriff,
             "epic_managed_worktree": epic_managed_worktree,
         }
     except BaseException as exc:

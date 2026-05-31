@@ -14,6 +14,49 @@ def _fake_agent_step(**_kwargs: object) -> SimpleNamespace:
     return SimpleNamespace(verdict="approved", summary="", bead_id="step")
 
 
+def test_sheriff_handoff_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    # Off by default (no .ade/settings.toml, no env).
+    monkeypatch.delenv("PO_SHERIFF_HANDOFF", raising=False)
+    assert sd_mod._sheriff_handoff_enabled(rig) is False
+    # On via env.
+    monkeypatch.setenv("PO_SHERIFF_HANDOFF", "1")
+    assert sd_mod._sheriff_handoff_enabled(rig) is True
+    monkeypatch.delenv("PO_SHERIFF_HANDOFF", raising=False)
+    # On via .ade/settings.toml (ADE mode).
+    (rig / ".ade").mkdir()
+    (rig / ".ade" / "settings.toml").write_text("[involvement]\nmerge_mode='auto'\n")
+    assert sd_mod._sheriff_handoff_enabled(rig) is True
+
+
+def test_handoff_to_sheriff_labels_review_and_triggers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    monkeypatch.setattr(sd_mod, "push_worktree_branch", None, raising=False)
+    # stub the worktree push (imported lazily inside the helper)
+    monkeypatch.setattr(
+        wt_mod, "push_worktree_branch",
+        lambda *_a, **_k: {"branch": "wts-f1", "pushed": False, "remote": False},
+    )
+    runs: list[list[str]] = []
+    monkeypatch.setattr(sd_mod.subprocess, "run", lambda cmd, **_k: runs.append(cmd))
+    popens: list[list[str]] = []
+
+    class _P:
+        def __init__(self, cmd, **_k):
+            popens.append(cmd)
+
+    monkeypatch.setattr(sd_mod.subprocess, "Popen", _P)
+    out = sd_mod._handoff_to_sheriff(rig, "f1", logging.getLogger(__name__))
+    assert out["branch"] == "wts-f1"
+    assert out["sheriff_triggered"] is True
+    assert any("--add-label" in c and "review" in c for c in runs)
+    assert any("pr-sheriff" in c for c in popens)
+
+
 def test_shared_epic_context_skips_child_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
