@@ -518,6 +518,70 @@ def _sheriff_handoff_enabled(main_rig: Path) -> bool:
     return (main_rig / ".ade" / "settings.toml").is_file()
 
 
+def _toml_scalar(val: object) -> str:
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    if isinstance(val, (int, float)):
+        return str(val)
+    return '"' + str(val).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _ade_env_settings(main_rig: Path) -> dict[str, object]:
+    """The `[env]` table from `.ade/settings.toml` (empty if absent)."""
+    import tomllib
+
+    path = main_rig / ".ade" / "settings.toml"
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return {}
+    env = data.get("env")
+    return env if isinstance(env, dict) else {}
+
+
+def _write_env_recipe(main_rig: Path, issue_id: str, branch: str, logger: Any) -> Path | None:
+    """Capture a revive recipe at `<rig>/.ade/envs/<feature>.toml` (dco).
+
+    So the env this feature was built in can be brought back to poke at via
+    `rclaude revive <feature>`. backend / setup_cmd / smoke_* come from
+    `.ade/settings.toml [env]`; repo is the rig's `origin`; box_id is left empty
+    (cold — revive re-provisions). Best-effort: never fails the flow.
+    """
+    try:
+        env = _ade_env_settings(main_rig)
+        origin = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(main_rig), capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        # Strip any embedded credentials (a global git insteadOf can inject a
+        # PAT into the URL — never persist that into a recipe file).
+        origin = re.sub(r"(https?://)[^/@]+@", r"\1", origin)
+        recipe = {
+            "feature_id": issue_id,
+            "backend": str(env.get("backend", "")),
+            "repo": origin,
+            "branch": branch,
+            "setup_cmd": str(env.get("setup_cmd", "")),
+            "smoke_cmd": str(env.get("smoke_cmd", "")),
+            "smoke_instructions": str(env.get("smoke_instructions", "")),
+            "box_id": "",  # cold by default; warm-box policy lives in the rclaude dispatch path
+        }
+        envs_dir = main_rig / ".ade" / "envs"
+        envs_dir.mkdir(parents=True, exist_ok=True)
+        path = envs_dir / (issue_id + ".toml")
+        lines = ["# rclaude env-revival recipe — `rclaude revive " + issue_id + "`", ""]
+        lines += [k + " = " + _toml_scalar(v) for k, v in recipe.items()]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.info("env-recipe: wrote %s", path)
+        return path
+    except Exception:  # noqa: BLE001
+        logger.exception("env-recipe: failed to write recipe for %s", issue_id)
+        return None
+
+
 def _handoff_to_sheriff(main_rig: Path, issue_id: str, logger: Any) -> dict[str, object]:
     """Finalize a feature by handing it to the PR Sheriff (CI gate → merge).
 
@@ -529,6 +593,9 @@ def _handoff_to_sheriff(main_rig: Path, issue_id: str, logger: Any) -> dict[str,
     from po_formulas_wts.worktree import push_worktree_branch
 
     push = push_worktree_branch(main_rig, issue_id)
+
+    # Capture a revive recipe so the env is one `rclaude revive` away.
+    recipe_path = _write_env_recipe(main_rig, issue_id, str(push.get("branch") or ""), logger)
 
     # Board signal: leave Working, enter Review.
     subprocess.run(
@@ -558,12 +625,18 @@ def _handoff_to_sheriff(main_rig: Path, issue_id: str, logger: Any) -> dict[str,
         triggered = False
 
     logger.info(
-        "sheriff-handoff: %s pushed=%s review-labelled, sheriff triggered=%s",
+        "sheriff-handoff: %s pushed=%s review-labelled, sheriff triggered=%s, recipe=%s",
         push.get("branch"),
         push.get("pushed"),
         triggered,
+        recipe_path,
     )
-    return {"branch": push.get("branch"), "pushed": push.get("pushed"), "sheriff_triggered": triggered}
+    return {
+        "branch": push.get("branch"),
+        "pushed": push.get("pushed"),
+        "sheriff_triggered": triggered,
+        "env_recipe": str(recipe_path) if recipe_path else None,
+    }
 
 
 # ─────────────────────── the flow ────────────────────────────────────
