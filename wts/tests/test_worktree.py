@@ -23,6 +23,7 @@ from po_formulas_wts.worktree import (
     cleanup_worktree,
     commit_pending,
     merge_worktree,
+    push_worktree_branch,
     sanitize,
     setup_worktree,
 )
@@ -91,6 +92,42 @@ def test_worktree_paths_for_epic_reuses_issue_naming(tmp_path: Path):
     issue_paths = WorktreePaths.for_issue(tmp_path / "myrig", "epic.1")
     epic_paths = WorktreePaths.for_epic(tmp_path / "myrig", "epic.1")
     assert epic_paths == issue_paths
+
+
+# ─── push_worktree_branch (PR Sheriff handoff) ───
+
+
+def test_push_worktree_branch_no_remote_commits_local(rig: Path):
+    """No `origin` (local-only rig): commits pending work, leaves the branch
+    local for the Sheriff, reports pushed=False."""
+    setup_worktree(rig, "demo", shared_dirs=(".beads",))
+    wt = rig / ".worktrees" / "wts-demo"
+    (wt / "feature.txt").write_text("new work\n")
+    out = push_worktree_branch(rig, "demo")
+    assert out == {"branch": "wts-demo", "pushed": False, "remote": False}
+    # the pending change was committed on the branch
+    log = _git("log", "--oneline", cwd=wt).stdout
+    assert "pre-handoff snapshot" in log
+
+
+def test_push_worktree_branch_missing_worktree(rig: Path):
+    out = push_worktree_branch(rig, "never-made")
+    assert out["pushed"] is False
+    assert out["branch"] == "wts-never-made"
+
+
+def test_push_worktree_branch_with_remote(rig: Path, tmp_path: Path):
+    """With an `origin` bare remote, the branch is pushed."""
+    bare = tmp_path / "origin.git"
+    _git("init", "-q", "--bare", str(bare), cwd=tmp_path)
+    _git("remote", "add", "origin", str(bare), cwd=rig)
+    setup_worktree(rig, "demo", shared_dirs=(".beads",))
+    wt = rig / ".worktrees" / "wts-demo"
+    (wt / "feature.txt").write_text("new work\n")
+    out = push_worktree_branch(rig, "demo")
+    assert out == {"branch": "wts-demo", "pushed": True, "remote": True}
+    refs = _git("ls-remote", "--heads", str(bare), cwd=rig).stdout
+    assert "wts-demo" in refs
 
 
 # ─── _is_git_repo ───

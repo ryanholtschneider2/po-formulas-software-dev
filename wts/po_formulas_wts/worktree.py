@@ -313,6 +313,43 @@ def _current_branch(repo: Path) -> str:
     return _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo).stdout.strip()
 
 
+def _has_remote(repo: Path) -> bool:
+    return bool(_run(["git", "remote"], cwd=repo, check=False).stdout.strip())
+
+
+def push_worktree_branch(
+    rig_path: Path | str,
+    issue_id: str,
+    *,
+    for_epic: bool = False,
+) -> dict[str, object]:
+    """Commit anything pending in the bead's worktree and push its branch.
+
+    Used by the PR-Sheriff handoff (ADE mode): instead of merging the worktree
+    back into main, leave it intact and push the branch so the Sheriff (or a
+    PR) can pick it up. No-ops gracefully when there is no `origin` remote
+    (local-only repo) — the branch still exists locally for the Sheriff.
+
+    Returns `{branch, pushed, remote}`. Raises only on a real push failure.
+    """
+    paths = _paths_for(rig_path, issue_id, for_epic=for_epic)
+    if not paths.worktree.exists():
+        logger.warning("worktree: %s missing; nothing to push", paths.worktree)
+        return {"branch": paths.branch, "pushed": False, "remote": False}
+
+    commit_pending(rig_path, issue_id, message=f"[{issue_id}] pre-handoff snapshot", for_epic=for_epic)
+
+    remote = _has_remote(paths.worktree)
+    pushed = False
+    if remote:
+        _run(["git", "push", "-u", "origin", paths.branch], cwd=paths.worktree)
+        pushed = True
+        logger.info("worktree: pushed %s to origin", paths.branch)
+    else:
+        logger.info("worktree: no remote; %s left local for the Sheriff", paths.branch)
+    return {"branch": paths.branch, "pushed": pushed, "remote": remote}
+
+
 def merge_worktree(
     rig_path: Path | str,
     issue_id: str,
