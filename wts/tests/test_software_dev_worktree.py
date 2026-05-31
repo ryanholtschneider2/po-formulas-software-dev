@@ -30,6 +30,43 @@ def test_sheriff_handoff_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert sd_mod._sheriff_handoff_enabled(rig) is True
 
 
+def test_write_env_recipe_from_ade_settings(tmp_path: Path) -> None:
+    import subprocess as _sp
+
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    _sp.run(["git", "init", "-q", str(rig)], check=True)
+    _sp.run(["git", "-C", str(rig), "remote", "add", "origin", "https://github.com/me/app"], check=True)
+    (rig / ".ade").mkdir()
+    (rig / ".ade" / "settings.toml").write_text(
+        "[env]\nbackend='hetzner'\nsetup_cmd='docker compose up -d'\n"
+        "smoke_cmd='curl -sf localhost:8080/health'\nsmoke_instructions='Open :8080.'\n"
+    )
+    p = sd_mod._write_env_recipe(rig, "f-1", "wts-f_1", logging.getLogger(__name__))
+    assert p is not None and p == rig / ".ade" / "envs" / "f-1.toml"
+    text = p.read_text()
+    assert 'backend = "hetzner"' in text
+    assert 'repo = "https://github.com/me/app"' in text
+    assert 'branch = "wts-f_1"' in text
+    assert 'setup_cmd = "docker compose up -d"' in text
+    assert 'box_id = ""' in text
+    # never persist an insteadOf-injected credential into the recipe
+    assert "@github.com" not in text and "ghp_" not in text
+
+
+def test_write_env_recipe_no_ade_settings_still_writes(tmp_path: Path) -> None:
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    import subprocess as _sp
+
+    _sp.run(["git", "init", "-q", str(rig)], check=True)
+    p = sd_mod._write_env_recipe(rig, "f-2", "wts-f_2", logging.getLogger(__name__))
+    assert p is not None
+    text = p.read_text()
+    assert 'feature_id = "f-2"' in text
+    assert 'backend = ""' in text  # empty when no [env]
+
+
 def test_handoff_to_sheriff_labels_review_and_triggers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
