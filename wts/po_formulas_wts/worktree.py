@@ -47,6 +47,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -204,13 +205,39 @@ def _wire_shared_dir(name: str, src: Path, worktree: Path) -> None:
         # Tracked + materialized in the worktree — gastown-style fallback.
         pass
     if name == ".beads":
+        # bd resolves the shared dolt server via the redirect file; no
+        # filesystem artifact sharing needed.
         _write_beads_redirect(src, worktree)
     else:
-        logger.info(
-            "worktree: %s is git-tracked; left in place "
-            "(run artifacts route to main via the absolute run_dir)",
-            name,
-        )
+        # `.planning/` holds run artifacts that two code paths read+write
+        # (the flow creates run_dir; context_bundle/agents write into it).
+        # They only coincide if `<wt>/.planning` IS `<main>/.planning`, so
+        # restore the symlink even though git materialized a tracked copy.
+        # `--skip-worktree` makes git ignore the swap so `git add -A`
+        # (merge-back) never stages it or clobbers main's tracked copy.
+        _skip_worktree_and_symlink(name, src, dst, worktree)
+
+
+def _skip_worktree_and_symlink(name: str, src: Path, dst: Path, worktree: Path) -> None:
+    """Replace a git-tracked, materialized `<wt>/<name>` dir with a symlink
+    to `src`, marking its tracked entries skip-worktree so git ignores the
+    swap. Restores the untracked-rig symlink semantics for tracked rigs."""
+    proc = _run(["git", "ls-files", "-z", name], cwd=worktree, check=False)
+    files = [p for p in proc.stdout.split("\0") if p]
+    if files:
+        # Chunk to stay well under ARG_MAX on huge run-dir trees.
+        for i in range(0, len(files), 500):
+            _run(
+                ["git", "update-index", "--skip-worktree", "--", *files[i : i + 500]],
+                cwd=worktree,
+                check=False,
+            )
+    if dst.is_symlink():
+        dst.unlink()
+    elif dst.is_dir():
+        shutil.rmtree(dst)
+    dst.symlink_to(src.resolve())
+    logger.info("worktree: %s tracked → skip-worktree + symlink to main", name)
 
 
 def _worktree_exclude_file(main_rig: Path, branch: str) -> Path:

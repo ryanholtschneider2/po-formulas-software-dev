@@ -259,8 +259,10 @@ def test_setup_epic_worktree_tracked_beads_writes_redirect(tmp_path: Path):
     assert (wt / redirect.read_text().strip()).resolve() == (repo / ".beads").resolve()
 
 
-def test_setup_worktree_tracked_planning_left_in_place(tmp_path: Path):
-    """Tracked `.planning/` → left in place (no refusal, no symlink)."""
+def test_setup_worktree_tracked_planning_symlinks_to_main(tmp_path: Path):
+    """Tracked `.planning/` → symlinked to main (skip-worktree) so the run_dir
+    is identical from the flow's and the agents' POV; a new run-dir created in
+    the worktree shows up in main, and the swap is not staged for merge-back."""
     repo = _repo_with_tracked_beads(tmp_path)
     (repo / ".planning").mkdir()
     (repo / ".planning" / "old.txt").write_text("prior artifact\n")
@@ -269,8 +271,17 @@ def test_setup_worktree_tracked_planning_left_in_place(tmp_path: Path):
 
     wt = setup_worktree(repo, "demo2", shared_dirs=(".beads", ".planning"))
     planning = wt / ".planning"
-    assert planning.is_dir() and not planning.is_symlink()
-    assert (planning / "old.txt").is_file()
+    assert planning.is_symlink()
+    assert planning.resolve() == (repo / ".planning").resolve()
+
+    # An agent writing a run-dir in the worktree lands in main (seamless).
+    (planning / "software-dev-full" / "demo2").mkdir(parents=True)
+    (planning / "software-dev-full" / "demo2" / "CONTEXT.md").write_text("ctx\n")
+    assert (repo / ".planning" / "software-dev-full" / "demo2" / "CONTEXT.md").is_file()
+
+    # The symlink swap must not show up as a staged/merge-back change.
+    status = _git("status", "--porcelain", cwd=wt).stdout
+    assert ".planning" not in status, f"unexpected .planning churn: {status!r}"
 
 
 def test_setup_worktree_rejects_non_git_dir(tmp_path: Path):
