@@ -11,14 +11,20 @@ Nesting worktrees *inside* the main rig keeps the parent directory
 `.worktrees/` to the main rig's `.git/info/exclude` so `git status`
 in main stays clean.
 
-Shared resources are symlinked back to the main rig so they stay
-authoritative across worktrees:
+Shared resources point back to the main rig so they stay authoritative
+across worktrees. How depends on whether the dir is git-tracked:
 
-- `.beads/` — bd's dolt-server data lives in main only; symlink lets
-  bd queries from a worktree see the same truth.
-- `.planning/` — per-bead run dirs accumulate in main's `.planning/`,
-  so `po watch` / `po artifacts` / `epic-finalize` find everything in
-  one place.
+- Untracked (common case) → symlinked back to main. Proven behavior.
+- Tracked (e.g. a rig that committed `.beads/`/`.planning/`) → `git
+  worktree add` materializes a real copy in the worktree, so we can't
+  symlink. We mirror gas town instead:
+  - `.beads/` — drop bd's native `redirect` file (a relative path bd
+    follows to main's `.beads/`). Works for dolt-server and embedded;
+    coexists with the checked-out `metadata.json`. No `git rm` needed.
+  - `.planning/` — leave the checked-out dir in place. Run artifacts
+    route to main's `.planning/` via the flow's absolute `run_dir`
+    (rig_path is the main rig), so `po watch`/`artifacts`/`epic-finalize`
+    still find everything in one place.
 
 Other tracked files (source, pyproject, .po-env, CLAUDE.md, …) are
 copied into the worktree by `git worktree add` automatically.
@@ -39,6 +45,7 @@ imports. Callable from any flow or from a dry-run script.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -149,6 +156,61 @@ def _ensure_symlink(src: Path, dst: Path) -> None:
         else:
             return
     dst.symlink_to(src.resolve())
+
+
+def _write_beads_redirect(beads_src: Path, worktree: Path) -> None:
+    """gastown-style sharing for a git-TRACKED `.beads/`.
+
+    When `.beads/` is tracked, `git worktree add` materializes a real,
+    non-empty `.beads/` in the worktree, so we can't symlink over it.
+    Instead we drop bd's native `redirect` file: a one-line relative path
+    that bd's resolver follows to the main rig's `.beads/` (the shared
+    dolt server in server mode, or the embedded data dir otherwise). The
+    redirect coexists with the checked-out `metadata.json`/`config.yaml`
+    (bd prefers the redirect), so no `git rm` is needed.
+
+    Per bd's contract the path is resolved from the dir CONTAINING
+    `.beads/` (the worktree), not from inside `.beads/`. `redirect` is
+    gitignored by bd's `.beads/.gitignore`, so it never gets committed.
+    """
+    beads_dst = worktree / ".beads"
+    beads_dst.mkdir(parents=True, exist_ok=True)
+    rel = os.path.relpath(beads_src.resolve(), worktree.resolve())
+    (beads_dst / "redirect").write_text(rel + "\n", encoding="utf-8")
+    logger.info("worktree: wrote %s/.beads/redirect -> %s", worktree.name, rel)
+
+
+def _wire_shared_dir(name: str, src: Path, worktree: Path) -> None:
+    """Make a worktree see the main rig's shared `name` dir.
+
+    Untracked rigs (the common case) get a symlink back to main — the
+    original, proven behavior. When the dir is git-TRACKED (so the
+    worktree materialized a real non-empty copy), we don't fight it:
+
+    - `.beads/` → write a bd `redirect` file (see `_write_beads_redirect`).
+    - anything else (`.planning/`) → leave the checked-out dir in place.
+      Run artifacts route to main's `.planning/` via the flow's absolute
+      `run_dir` (rig_path is the main rig), so the in-worktree copy is
+      inert and merges back untouched.
+
+    This keeps behavior identical for untracked rigs and turns the old
+    hard-refusal on tracked dirs into a working path.
+    """
+    dst = worktree / name
+    try:
+        _ensure_symlink(src, dst)
+        return
+    except RuntimeError:
+        # Tracked + materialized in the worktree — gastown-style fallback.
+        pass
+    if name == ".beads":
+        _write_beads_redirect(src, worktree)
+    else:
+        logger.info(
+            "worktree: %s is git-tracked; left in place "
+            "(run artifacts route to main via the absolute run_dir)",
+            name,
+        )
 
 
 def _worktree_exclude_file(main_rig: Path, branch: str) -> Path:
@@ -276,7 +338,7 @@ def setup_worktree(
     for name in shared_dirs:
         src = paths.main_rig / name
         src.mkdir(parents=True, exist_ok=True)
-        _ensure_symlink(src, paths.worktree / name)
+        _wire_shared_dir(name, src, paths.worktree)
 
     return paths.worktree
 

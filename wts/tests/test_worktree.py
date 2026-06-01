@@ -220,8 +220,9 @@ def test_setup_worktree_creates_shared_dirs_when_missing(tmp_path: Path):
     assert (wt / ".planning").resolve() == (repo / ".planning").resolve()
 
 
-def test_setup_worktree_refuses_nonempty_real_dir_in_worktree(tmp_path: Path):
-    """When git tracked .beads and materializes it in the worktree, raise RuntimeError."""
+def _repo_with_tracked_beads(tmp_path: Path) -> Path:
+    """A git rig that has COMMITTED its `.beads/` (the gastown / dolt-server
+    rig shape). `git worktree add` materializes a real `.beads/` in the wt."""
     repo = tmp_path / "rig"
     repo.mkdir()
     _git("init", "-q", "-b", "main", cwd=repo)
@@ -229,28 +230,47 @@ def test_setup_worktree_refuses_nonempty_real_dir_in_worktree(tmp_path: Path):
     _git("config", "user.name", "Test", cwd=repo)
     (repo / "a.txt").write_text("hello\n")
     (repo / ".beads").mkdir()
-    (repo / ".beads" / "metadata.json").write_text('{"dolt_mode": "embedded"}')
+    (repo / ".beads" / "metadata.json").write_text('{"dolt_mode": "server"}')
     _git("add", "-A", cwd=repo)
     _git("commit", "-q", "-m", "init with .beads", cwd=repo)
-    # .beads is tracked; git worktree add materializes a real non-empty .beads/ in the wt
-    with pytest.raises(RuntimeError, match=r"git rm -rf \.beads"):
-        setup_worktree(repo, "demo", shared_dirs=(".beads",))
+    return repo
 
 
-def test_setup_epic_worktree_refuses_nonempty_real_dir_in_worktree(tmp_path: Path):
-    repo = tmp_path / "rig"
-    repo.mkdir()
-    _git("init", "-q", "-b", "main", cwd=repo)
-    _git("config", "user.email", "test@example.com", cwd=repo)
-    _git("config", "user.name", "Test", cwd=repo)
-    (repo / "a.txt").write_text("hello\n")
-    (repo / ".beads").mkdir()
-    (repo / ".beads" / "metadata.json").write_text('{"dolt_mode": "embedded"}')
+def test_setup_worktree_tracked_beads_writes_redirect(tmp_path: Path):
+    """Tracked `.beads/` → no refusal; bd `redirect` file points back to main."""
+    repo = _repo_with_tracked_beads(tmp_path)
+    wt = setup_worktree(repo, "demo", shared_dirs=(".beads",))
+
+    redirect = wt / ".beads" / "redirect"
+    assert redirect.is_file(), "redirect file should be written for tracked .beads"
+    # Resolves (from the worktree) to the main rig's .beads.
+    target = (wt / redirect.read_text().strip()).resolve()
+    assert target == (repo / ".beads").resolve()
+    # Checked-out metadata.json is left intact alongside the redirect.
+    assert (wt / ".beads" / "metadata.json").is_file()
+
+
+def test_setup_epic_worktree_tracked_beads_writes_redirect(tmp_path: Path):
+    repo = _repo_with_tracked_beads(tmp_path)
+    wt = setup_worktree(repo, "epic.1", shared_dirs=(".beads",), for_epic=True)
+
+    redirect = wt / ".beads" / "redirect"
+    assert redirect.is_file()
+    assert (wt / redirect.read_text().strip()).resolve() == (repo / ".beads").resolve()
+
+
+def test_setup_worktree_tracked_planning_left_in_place(tmp_path: Path):
+    """Tracked `.planning/` → left in place (no refusal, no symlink)."""
+    repo = _repo_with_tracked_beads(tmp_path)
+    (repo / ".planning").mkdir()
+    (repo / ".planning" / "old.txt").write_text("prior artifact\n")
     _git("add", "-A", cwd=repo)
-    _git("commit", "-q", "-m", "init with .beads", cwd=repo)
+    _git("commit", "-q", "-m", "track .planning", cwd=repo)
 
-    with pytest.raises(RuntimeError, match=r"git rm -rf \.beads"):
-        setup_worktree(repo, "epic.1", shared_dirs=(".beads",), for_epic=True)
+    wt = setup_worktree(repo, "demo2", shared_dirs=(".beads", ".planning"))
+    planning = wt / ".planning"
+    assert planning.is_dir() and not planning.is_symlink()
+    assert (planning / "old.txt").is_file()
 
 
 def test_setup_worktree_rejects_non_git_dir(tmp_path: Path):
