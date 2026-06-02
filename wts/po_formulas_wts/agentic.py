@@ -106,9 +106,7 @@ def software_dev_agentic_wts(
                     main_rig_path_p,
                 )
             else:
-                logger.info(
-                    "worktree: skipped — %s is not a git repo", main_rig_path_p
-                )
+                logger.info("worktree: skipped — %s is not a git repo", main_rig_path_p)
         except Exception as exc:  # noqa: BLE001
             logger.warning("worktree: setup failed (%s); falling back to main rig", exc)
             rig_path_p = main_rig_path_p
@@ -261,7 +259,9 @@ def software_dev_agentic_wts(
                 from po_formulas_wts.worktree import merge_worktree
 
                 try:
-                    merged_into = merge_worktree(main_rig_path_p, issue_id, cleanup=True)
+                    merged_into = merge_worktree(
+                        main_rig_path_p, issue_id, cleanup=True
+                    )
                     logger.info("worktree: merged into %s", merged_into)
                 except Exception as exc:  # noqa: BLE001
                     logger.error(
