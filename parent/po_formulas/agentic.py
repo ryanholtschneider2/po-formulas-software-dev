@@ -225,16 +225,21 @@ def _cmd_or_captured(
 
 
 def _has_lint_failure(text: str) -> bool:
-    """Heuristic failure detection for captured lint/format output."""
+    """Heuristic failure detection for captured lint/format output.
+
+    Error counts are matched only when > 0 (ruff/mypy/tsc all print a
+    ``Found N error(s)`` / ``N errors`` summary), so clean output like
+    ``0 errors`` / ``no errors found`` does not false-positive.
+    """
     markers = (
         r"would reformat",
-        r"\berror\b",
-        r"\berrors\b",
         r"\bFAILED\b",
         r"lint failed",
-        r"Found \d+ error",
     )
-    return any(re.search(m, text, re.IGNORECASE) for m in markers)
+    if any(re.search(m, text, re.IGNORECASE) for m in markers):
+        return True
+    # A non-zero error count is a failure; "0 errors" / "no errors" are not.
+    return any(int(m.group(1)) > 0 for m in re.finditer(r"(\d+)\s+errors?\b", text))
 
 
 def _parse_pytest_summary(text: str) -> tuple[int | None, int | None]:

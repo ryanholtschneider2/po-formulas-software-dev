@@ -154,6 +154,17 @@ def test_cmd_or_captured_captured_lint(tmp_path: Path) -> None:
     assert ag._cmd_or_captured("lint", None, tmp_path, tmp_path)[0] is False
 
 
+def test_has_lint_failure_zero_error_count_not_flagged() -> None:
+    """Clean output reporting a zero count must not register as a failure."""
+    assert ag._has_lint_failure("Checked 12 files, 0 errors") is False
+    assert ag._has_lint_failure("no errors found") is False
+    assert ag._has_lint_failure("Found 0 errors.") is False
+    # Non-zero counts and explicit failure markers still flag.
+    assert ag._has_lint_failure("Found 2 errors.") is True
+    assert ag._has_lint_failure("1 error") is True
+    assert ag._has_lint_failure("would reformat foo.py") is True
+
+
 # ─────────────────────── _regression_ok ─────────────────────────────
 
 
