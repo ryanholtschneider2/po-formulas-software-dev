@@ -11,10 +11,10 @@ A formula pack for [`prefect-orchestration`](../../prefect-orchestration)
   build → lint → test-unit → docs → close. 4–15 min wall vs 30–60+ for
   full. Use for static-text changes, registry entries, single-component
   features, focused bug fixes. See section below.
-- **`software-dev-agentic`** — inverted decomposition. One worker agent
-  owns the whole plan → build → lint → test loop, then pure-Python
-  machine gates adjudicate and one reviewer rates HIGH/MEDIUM/LOW. See
-  section below.
+- **`software-dev-agentic`** — prompt-driven and minimal. One actor agent
+  is told to open a worktree off `main`, implement the feature, run the
+  repo's own tests / CI, and open a PR — looped against one critic that
+  verifies goal accomplishment. See section below.
 - **`epic`** — reads the open children of a beads epic, builds a Prefect
   DAG from their dependencies, and fans them out as concurrent
   `software-dev-full` sub-flows.
@@ -47,7 +47,7 @@ before code lands. **Use fast when:** static-text changes, registry
 entries, single-component features, doc-only changes, focused bug fixes.
 When in doubt, full.
 
-## `software-dev-agentic` — agent-owned loop + machine gates + 1 reviewer
+## `software-dev-agentic` — one prompt-driven actor + one goal critic
 
 ```bash
 po run software-dev-agentic \
@@ -56,50 +56,39 @@ po run software-dev-agentic \
   --rig-path <path>
 ```
 
-Inverts the actor-critic decomposition. Rather than splitting
-plan/build/lint/test across many roles, **one worker agent owns the
-whole loop** (it may spawn its own subagents). After the worker turn a
-**pure-Python mechanical gate layer** (no LLM) adjudicates the result,
-then **exactly one reviewer agent** rates the work `HIGH/MEDIUM/LOW`.
+The prompt-over-code variant: essentially **one actor prompt + one
+critic**. The actor agent is prompted (not orchestrator-wired) to open a
+worktree off `main`, implement the feature there, run the repo's own
+tests / CI, and **open a PR** when it's done. Then **exactly one critic
+agent** verifies *goal accomplishment* — did the actor implement the
+request faithfully? — and returns `pass` / `fail`. On `fail` the critic
+writes a concrete fix list and the actor iterates against it.
 
 Pipeline:
 
 ```
-claim seed → baseline → loop(worker → machine gates → reviewer) → close
+claim seed → loop(actor: worktree → build → test → PR  →  critic: pass | fail) → close
 ```
 
-The seed closes **iff** the machine gates are green **AND** the reviewer
-is `>= MEDIUM` — and the *flow* performs the close, never the worker (the
-worker only ever closes its own iter bead). If it doesn't converge within
-`--iter-cap` iterations the flow raises and leaves run-dir artifacts at
-`<rig>/.planning/software-dev-agentic/<issue>/` for forensics.
-
-**Machine gates** (all must pass, written to `verdicts/`):
-
-| Check | What it asserts |
-|---|---|
-| `diff_clean` | Working tree committed and real work landed since the baseline ref. |
-| `anti_mock` | No `unittest.mock` / `MagicMock` / `@patch` etc. added to non-`tests/` (production) files. |
-| `lint` | Lint clean (reads the worker's teed `gate-lint.txt`, or re-runs the resolved lint command). |
-| `tests` | Unit suite passes (reads teed `gate-tests.txt`, or re-runs). |
-| `regression` | Passed/failed counts didn't regress vs the baseline. |
-
-Gates diff `baseline_ref..HEAD` (not `HEAD~1..HEAD`), so a multi-commit
-worker turn is fully covered.
+There is **no mechanical gate layer**: running tests and opening the PR
+are the actor's job, and the goal-verifying critic is the only gate that
+matters. The flow **never auto-merges** — the actor leaves a PR for human
+review. The seed closes iff the critic passes, and the *flow* (not the
+actor) performs the close (the actor only ever closes its own iter bead).
+If it doesn't converge within `--iter-cap` iterations the flow raises and
+leaves run-dir artifacts at `<rig>/.planning/software-dev-agentic/<issue>/`
+for forensics.
 
 **Knobs:**
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--iter-cap N` | `2` | Max worker→gate→review iterations before failing loud. |
-| `--test-cmd "..."` | auto | Explicit gate test command (else auto-detects a Makefile `test-unit` target, falling back to the worker's teed output). |
-| `--lint-cmd "..."` | auto | Explicit gate lint command (else auto-detects a Makefile `lint` target). |
-| `--pack-path <path>` | `rig-path` | Code root to diff/gate when the repo under test differs from the rig root. |
+| `--iter-cap N` | `2` | Max actor→critic iterations before failing loud. |
+| `--pack-path <path>` | `rig-path` | Code root the actor opens its worktree in, when the repo under test differs from the rig root. |
 
-**Use when:** you want the agent to own decomposition end to end but
-still need machine-enforced quality bars (committed diff, no leaked
-mocks, lint/tests green, no regression) plus a single quality review —
-without the full multi-critic ceremony.
+**Use when:** you want the agent to own the whole loop — including the
+worktree and the PR — judged only on whether it accomplished the goal,
+the minimal prompt-driven way.
 
 ## `minimal-task` — lightweight pipeline for fanout demos
 
