@@ -24,6 +24,7 @@ pr-writer = "po_formulas_wts.pr_writer:pr_writer"
 # → epic_finalize → pr_writer in one invocation. See
 # po_formulas_wts/epic_wts.py + prefect-orchestration-54n.
 epic-wts = "po_formulas_wts.epic_wts:epic_wts"
+software-dev-agentic-wts = "po_formulas_wts.agentic:software_dev_agentic_wts"
 
 [build-system]
 requires = ["hatchling"]
