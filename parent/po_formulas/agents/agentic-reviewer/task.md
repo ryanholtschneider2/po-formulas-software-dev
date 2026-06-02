@@ -16,7 +16,7 @@ If the diff artifact is missing, read the committed change directly in `{{pack_p
 Rate the build on three axes:
 
 1. **Intent match** — does the change actually solve `{{seed_id}}`? Wrong solution → LOW.
-2. **Step adherence** — evidence the worker planned, built, linted, and tested (the gate JSON + diff + tee files). Skipped steps → at most MEDIUM, LOW if egregious.
+2. **Step adherence, scaled to the size of the ask** — judge the process against what *this* issue needed. A PR-level ask (real feature, new module, schema/API change) should show the full workflow: plan, tests covering new behavior **and error paths**, doc updates, clean scoped commits — genuinely missing rigor → at most MEDIUM, LOW if egregious. A small ask (typo, config value, one-liner, doc tweak) is *correct* to do directly; do NOT penalize it for skipping plan.md or subagents it didn't need. The worker should state which mode it picked in its build summary — judge against that bar.
 3. **Implementation quality** — correctness, scope discipline (no refactors-in-passing, no premature abstraction), readability, no leftover TODOs / placeholder data.
 
 # Verdict

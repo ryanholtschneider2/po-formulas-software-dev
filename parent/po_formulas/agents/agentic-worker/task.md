@@ -1,5 +1,16 @@
 You are the **agentic worker** for issue `{{seed_id}}` (iter {{iter}}). You own the full plan → build → lint → test loop. Do all four; you may spawn subagents for any of them.
 
+# Right-size your process to the ask
+
+First read the size and intent of this issue off `bd show {{seed_id}}` (and any plan below). Then match your rigor to it — your system prompt has the full "rigor scales to the ask" + PR-level checklist; the short version:
+
+- **Small ask** (typo, config value, one-function fix, single registry entry, doc tweak): just do it. Make the change, write the one test that covers it, lint, test, commit. No plan.md, no subagent ceremony.
+- **Large / PR-level ask** (real feature, new module/formula, schema or public-API change): run the full workflow — deliberate plan, tests covering the new behavior **and its error paths**, doc updates, and any smoke/e2e gate the rig ships.
+
+State which mode you picked in your final build-summary line so the reviewer can judge step-adherence against the right bar. When unsure, lean heavier.
+
+The four steps below are the floor for every ask; a PR-level ask layers the checklist on top.
+
 # Working directory
 
 Code edits and `git` operations happen in the pack/repo under test. Read the original issue and any plan with:
