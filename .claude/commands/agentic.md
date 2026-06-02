@@ -1,5 +1,5 @@
 ---
-description: Dispatch a one-line ask through the software-dev-agentic flow (one worker owns plan→build→lint→test; machine gates + one reviewer)
+description: Dispatch a one-line ask through the software-dev-agentic flow (one actor: worktree off main → build → test → PR; looped against one goal-verifying critic)
 argument-hint: <one-line description of the work>
 ---
 
@@ -7,13 +7,13 @@ The user wants to run the **software-dev-agentic** flow on this one-line ask:
 
 > $ARGUMENTS
 
-`software-dev-agentic` is the thin, self-decomposing pipeline: a single
-worker agent owns the whole plan → build → lint → test loop (it may spawn
-subagents), then a pure-Python mechanical gate layer (tree clean, work
-landed, no mocked production code, lint clean, tests pass, no regression)
-plus exactly one reviewer (intent + right-sized step-adherence) decide
-whether the seed closes. Rigor scales to the ask — small asks are done
-directly, PR-level asks run the full workflow.
+`software-dev-agentic` is the thin, prompt-driven pipeline: a single actor
+agent is told to open a worktree off `main`, implement the feature, run the
+repo's own tests / CI, and open a PR (it may spawn subagents), then exactly
+one critic verifies *goal accomplishment* — did the actor implement the
+request faithfully? — and the seed closes on a critic pass. The flow never
+auto-merges; the PR is left for human review. Rigor scales to the ask —
+small asks are done directly, PR-level asks run the full workflow.
 
 Do this:
 
@@ -29,9 +29,8 @@ Do this:
 
    Capture the new id.
 
-2. **Dispatch the flow** on that id. Use the worktree-isolated formula by
-   default on Ryan's machine (`software-dev-agentic-wts` if it is
-   registered; otherwise `software-dev-agentic`):
+2. **Dispatch the flow** on that id (the actor opens its own worktree off
+   `main`, so there is no separate `-wts` variant):
 
    ```bash
    po run software-dev-agentic \

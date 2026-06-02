@@ -27,12 +27,6 @@ A formula pack for [`prefect-orchestration`](../../../prefect-orchestration)
   and stamps `metadata.validation = passed | blocked` on the epic so
   the PR-writer can gate. Invoke with `--epic-id <id>` or
   `--branch <name>` (mutually exclusive).
-- **`software-dev-agentic-wts`** — worktree-isolated variant of
-  `software-dev-agentic`. Runs the same single-worker + machine-gate +
-  reviewer pipeline inside a per-bead git worktree
-  (`<rig>/.worktrees/wts-<sanitized-id>/` on branch `wts-<id>`), then
-  merges back / opens a PR on success. Workers never commit directly to
-  `main`.
 - **`epic-wts`** — end-to-end epic runner. It creates one shared
   worktree for the epic at `<rig-path>/.worktrees/wts-<sanitized-epic-id>/` on
   branch `wts-<sanitized-epic-id>`, runs every child

@@ -4,7 +4,7 @@ Exposes via `po.formulas` entry points:
   * `software-dev-full` — end-to-end plan/build/review/verify/ralph pipeline
   * `epic`              — fan out an epic's ready children into a DAG of sub-flows
   * `minimal-task`      — lightweight triage→plan→build→lint→close for fanout demos
-  * `software-dev-agentic` — agent-owned plan→build→lint→test + machine gates + 1 reviewer
+  * `software-dev-agentic` — one prompt-driven actor (worktree off main → build → test → PR) looped against one goal-verifying critic
 """
 
 from po_formulas.agentic import software_dev_agentic
