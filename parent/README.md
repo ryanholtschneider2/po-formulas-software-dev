@@ -90,6 +90,14 @@ for forensics.
 worktree and the PR — judged only on whether it accomplished the goal,
 the minimal prompt-driven way.
 
+> **Note — the machine-gate variant was deliberately superseded.** An
+> earlier design (a "brief → worker → pure-Python mechanical gate layer
+> → HIGH/MEDIUM/LOW reviewer → close-iff-gates-green-and-review≥MEDIUM"
+> 5-stage flow) was built and then intentionally dropped in favour of the
+> prompt-over-code loop documented above. Re-introducing the mechanical
+> gate layer is a conscious philosophy reversal, not a bug fix — it needs
+> an explicit human decision, not a silent restore.
+
 ## `minimal-task` — lightweight pipeline for fanout demos
 
 Pipeline shape:
