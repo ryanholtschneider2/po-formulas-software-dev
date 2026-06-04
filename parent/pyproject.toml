@@ -56,3 +56,8 @@ packages = ["po_formulas"]
 # Path is relative to this pyproject.toml. Works when this repo is
 # cloned as a sibling of prefect-orchestration (canonical layout).
 prefect-orchestration = { path = "../../prefect-orchestration", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
