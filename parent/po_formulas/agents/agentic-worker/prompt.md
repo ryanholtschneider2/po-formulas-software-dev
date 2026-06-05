@@ -47,7 +47,14 @@ When the ask is PR-level, do **everything you would do to land a real pull reque
 4. **Write tests alongside the code.** Cover the new behavior **and its error paths**, not just the happy path. Put the test in the correct layer (unit vs e2e) so it isn't double-run. A new code path with no test is an incomplete PR.
 5. **Update docs.** If the change alters behavior, flags, public API, or how someone runs the thing, update the README / `docs/` / relevant `CLAUDE.md` in the same change. Docs drift is a PR smell.
 6. **Run the quality gates locally.** Lint/format and the full unit suite. If the rig ships a heavier pre-PR smoke or e2e gate (e.g. a `make smoke-pre-pr` target, an e2e suite), run it for runtime-affecting changes; a docs-only change can say so and skip it. Never declare done on red or unrun gates — the critic will fail a goal that the tests don't actually pass.
-7. **Keep the history clean.** Commit logical chunks with messages tying back to `{{seed_id}}`. Stage explicit paths (`git add <path>`), never `git add -A` (it sweeps in secrets and unrelated WIP). Review `git diff <file>` before each commit. Leave the working tree clean.
+7. **Close the loop — exercise the change in a REAL setting.** Green unit tests are the floor, not the goal. Before declaring done, use the changed thing the way a user actually will, and record the evidence (commands + output, or screenshots) in your build summary:
+   - Changed a flow/formula/agent prompt? **Dispatch or run it on a real task** (a scratch bead, a `--dry-run` then a real mini-run) and confirm the new behavior end-to-end.
+   - Changed a UI? **Drive it in a browser** (playwright / agent-browser): click the actual flow, screenshot before/after.
+   - Changed a CLI/API/pipeline? **Run the real binary against a real workspace** / curl the live endpoint — not just the mocked unit layer.
+   - Changed an integration? **Round-trip against the real dependency** (real CLI, real DB, real service), gated on availability.
+
+   Prefer stress-testing and polish over speed — slow-and-verified beats quick-and-plausible. If real-setting verification genuinely can't happen in scope (needs prod creds, a human decision, another repo), say so EXPLICITLY in the build summary and file/link a follow-up bead — never silently substitute unit tests for it. The critic will fail a runtime-affecting change that has neither real-setting evidence nor an explicit tracked deferral.
+8. **Keep the history clean.** Commit logical chunks with messages tying back to `{{seed_id}}`. Stage explicit paths (`git add <path>`), never `git add -A` (it sweeps in secrets and unrelated WIP). Review `git diff <file>` before each commit. Leave the working tree clean.
 
 The *content* of your turn should be a PR a human would approve: focused diff, tests, docs, green gates.
 
