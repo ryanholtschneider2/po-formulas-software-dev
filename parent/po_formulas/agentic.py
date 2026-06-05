@@ -27,11 +27,24 @@ Pipeline::
 All the convergence machinery (bead-stamping, session affinity, nudge
 ladder, verdict parsing, cache fast-path, run_dir, ``_record_flow_outcome``)
 is reused wholesale from ``agent_step`` and ``software_dev``.
+
+Per-rig preview/demo knobs (read from ``<rig>/.po-env`` via
+``_load_rig_env``)::
+
+    PO_PREVIEW=local|cloud|off   # default off
+    PO_DEMO_VIDEO=0|1            # default 0
+
+When ``PO_PREVIEW`` is ``local``/``cloud`` the worker is asked to leave a
+reachable preview of the change and write its URL to
+``<run_dir>/preview_url.txt``; on a critic pass the flow reads that file
+and stamps it as ``po.preview_url`` on the seed bead (parallel to how core
+stamps ``po.run_dir``) so dashboard cards can link the preview.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +82,102 @@ def _read_text(path: Path) -> str:
         return path.read_text()
     except OSError:
         return ""
+
+
+# ───────────────────── preview / demo knobs ─────────────────────────
+
+# Where the worker writes its reachable preview URL; the flow reads it on
+# a critic pass and stamps `po.preview_url`. Verdict-file pattern — never
+# parse the agent's reply text.
+_PREVIEW_URL_FILE = "preview_url.txt"
+_VALID_PREVIEW_MODES = ("local", "cloud", "off")
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def _resolve_preview_mode() -> str:
+    """Per-rig preview mode from ``PO_PREVIEW`` (loaded from ``.po-env``).
+
+    Defaults to ``off`` (no preview work) so existing rigs are unchanged.
+    Anything other than ``local``/``cloud``/``off`` falls back to ``off``.
+    """
+    mode = os.environ.get("PO_PREVIEW", "off").strip().lower()
+    return mode if mode in _VALID_PREVIEW_MODES else "off"
+
+
+def _demo_video_requested() -> bool:
+    """Whether this rig requests a demo video (``PO_DEMO_VIDEO`` truthy)."""
+    return os.environ.get("PO_DEMO_VIDEO", "0").strip().lower() in _TRUTHY
+
+
+def _preview_note(mode: str, run_dir: Path, demo: bool) -> str:
+    """Worker instruction block for the preview/demo knobs.
+
+    Returns ``""`` when there's nothing to ask for (``off`` mode and no
+    demo request) so the prompt is unchanged for rigs that haven't opted
+    in. The worker writes the URL to ``<run_dir>/preview_url.txt``; the
+    flow stamps it as ``po.preview_url``.
+    """
+    url_file = run_dir / _PREVIEW_URL_FILE
+    parts: list[str] = []
+    if mode == "local":
+        parts.append(
+            "# Leave a reachable preview (PO_PREVIEW=local)\n\n"
+            "After opening the PR, start the rig's dev server in the background "
+            "(e.g. `npm run dev &`, `uv run uvicorn ... &`) and leave it running. "
+            "Confirm it answers (curl the port), then write the reachable URL on "
+            f"its own line to `{url_file}` — e.g. `http://localhost:5173`. The "
+            "orchestrator reads that file and stamps it as `po.preview_url` on "
+            "the seed bead so the dashboard can link it. If the change has no "
+            "runnable surface (backend-only / library), write nothing and say so "
+            "in your build summary."
+        )
+    elif mode == "cloud":
+        parts.append(
+            "# Leave a reachable preview (PO_PREVIEW=cloud)\n\n"
+            "This is a cloud/rclaude workspace. After opening the PR, start the "
+            "dev server in the background, then run `rpreview <port>` to resolve a "
+            "public preview URL (the rclaude shim maps it to a reachable link / "
+            "k8s ingress; the workspace stays up per the backend's auto-stop "
+            f"settings). Write that URL on its own line to `{url_file}`. The "
+            "orchestrator stamps it as `po.preview_url`. If there's no runnable "
+            "surface, write nothing and note it in your build summary."
+        )
+    if demo:
+        parts.append(
+            "# Record a demo video (PO_DEMO_VIDEO=1)\n\n"
+            "This rig requests a short demo video for visual changes. If the "
+            "change has a UI surface, record a brief screen capture of the new "
+            "behavior (the rig's playwright / demo tooling) and note its path in "
+            "your build summary. Skip for backend-only changes."
+        )
+    return "\n\n".join(parts)
+
+
+def _bd_set_metadata(issue_id: str, key: str, value: str, rig_path: Path) -> None:
+    """Shell ``bd update <id> --set-metadata key=value`` (best-effort)."""
+    subprocess.run(
+        ["bd", "update", issue_id, "--set-metadata", f"{key}={value}"],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=str(rig_path),
+    )
+
+
+def _stamp_preview_url(issue_id: str, rig_path: Path, run_dir: Path) -> str:
+    """Read ``<run_dir>/preview_url.txt`` and stamp ``po.preview_url``.
+
+    Returns the stamped URL, or ``""`` when the worker wrote no preview
+    (missing/empty file). Takes the last non-empty line so a worker that
+    appends notes above the URL still works.
+    """
+    raw = _read_text(run_dir / _PREVIEW_URL_FILE)
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    url = lines[-1]
+    _bd_set_metadata(issue_id, "po.preview_url", url, rig_path)
+    return url
 
 
 # ─────────────────────── flow ───────────────────────────────────────
@@ -110,6 +219,9 @@ def software_dev_agentic(
     _load_rig_env(rig_path_p)
     _tag_flow_run_with_issue_id(issue_id, logger)
 
+    preview_mode = _resolve_preview_mode()
+    preview_note = _preview_note(preview_mode, run_dir, _demo_video_requested())
+
     try:
         critic_verdict = ""
         fix_list = ""
@@ -127,6 +239,7 @@ def software_dev_agentic(
                     "iter": iter_n,
                     "pack_path": str(pack_path_p),
                     "revision_note": _revision_note(fix_list),
+                    "preview_note": preview_note,
                 },
                 verdict_keywords=("complete", "failed"),
                 dry_run=dry_run,
@@ -170,6 +283,21 @@ def software_dev_agentic(
                 f"critic={critic_verdict or '(no verdict)'}"
             )
 
+        # End-of-run preview: read the worker's preview_url.txt and stamp
+        # po.preview_url so dashboard cards can link it. Best-effort — a
+        # backend-only change leaves no file and stamps nothing.
+        preview_url = ""
+        if not dry_run:
+            preview_url = _stamp_preview_url(issue_id, rig_path_p, run_dir)
+            if preview_url:
+                logger.info("agentic: stamped po.preview_url=%s", preview_url)
+            elif preview_mode != "off":
+                logger.info(
+                    "agentic: PO_PREVIEW=%s but worker wrote no %s",
+                    preview_mode,
+                    _PREVIEW_URL_FILE,
+                )
+
         if claim and not dry_run:
             close_issue(
                 issue_id,
@@ -180,6 +308,7 @@ def software_dev_agentic(
         return {
             "status": "completed",
             "critic_verdict": critic_verdict,
+            "preview_url": preview_url,
         }
     except Exception as exc:
         _record_flow_outcome(run_dir, exc, issue_id, str(rig_path_p))

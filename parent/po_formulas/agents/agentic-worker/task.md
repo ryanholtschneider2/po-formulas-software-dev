@@ -66,4 +66,6 @@ git -C ../$(basename {{pack_path}}).agentic-{{seed_id}} diff main...HEAD > {{run
 
 Reply with one line: `build complete: <N files changed>; PR <url-or-"none: reason">`.
 
+{{preview_note}}
+
 {{role_step_close_block}}

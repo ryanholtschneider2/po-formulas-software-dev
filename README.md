@@ -49,3 +49,25 @@ po-formulas-software-dev/
 ```
 
 Both subdirs ship their own `pyproject.toml`, `tests/`, and overlay. Cross-subdir imports are forbidden — each package stands on its own. Shared deps (`prefect-orchestration`) are sourced via each `pyproject.toml`'s `[tool.uv.sources]` block, with paths relative to that file.
+
+## `software-dev-agentic` preview/demo knobs (per-rig)
+
+The agentic flow can end a run with a **reachable preview** of the change,
+surfaced as `po.preview_url` bead metadata so dashboard cards (orchestra) can
+link it. Configure per-rig in `<rig>/.po-env` (the same KEY=VALUE file that
+gates test layers):
+
+| Var | Values | Effect |
+|---|---|---|
+| `PO_PREVIEW` | `local` \| `cloud` \| `off` | `off` (default): no preview work. `local`: the worker leaves its dev server running after the PR and reports `http://localhost:<port>`. `cloud`: the worker resolves a public URL via the rclaude shim (`rpreview <port>`). |
+| `PO_DEMO_VIDEO` | `0` \| `1` | `1` asks the worker to record a short demo video for visual changes. Default `0`. |
+
+Mechanism: the worker writes its URL to `<run_dir>/preview_url.txt`; on a critic
+pass the flow reads that file and stamps `po.preview_url` on the seed bead
+(parallel to how core stamps `po.run_dir`). A backend-only change leaves no file
+and stamps nothing. Example `.po-env`:
+
+```
+PO_PREVIEW=local
+PO_DEMO_VIDEO=1
+```
