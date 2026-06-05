@@ -28,6 +28,15 @@ All the convergence machinery (bead-stamping, session affinity, nudge
 ladder, verdict parsing, cache fast-path, run_dir, ``_record_flow_outcome``)
 is reused wholesale from ``agent_step`` and ``software_dev``.
 
+**Verdict-transport fallback.** The critic's verdict normally rides on its
+iter bead's close-reason. When the bead-close shellout fails (e.g. the rig's
+beads backend is swapped ``dolt``->``br`` mid-run and the old CLI loses its
+database), ``agent_step`` defensively force-closes the bead and its returned
+verdict is meaningless. The critic therefore records its verdict to a durable
+artifact (``review-verdict-iter-<n>.md``) *before* closing; on a force-close
+(``review.closed_by == "force"``) the flow recovers the real verdict from
+that file instead of declaring a fail and stranding a passing PR.
+
 Per-rig preview/demo knobs (read from ``<rig>/.po-env`` via
 ``_load_rig_env``)::
 
@@ -82,6 +91,36 @@ def _read_text(path: Path) -> str:
         return path.read_text()
     except OSError:
         return ""
+
+
+# ─────────────────── critic verdict-transport fallback ──────────────────
+
+# The critic writes its verdict here BEFORE closing its iter bead, so the
+# verdict survives even when the bead-close shellout fails (e.g. a beads
+# backend swapped dolt->br mid-run leaves the old CLI without a database).
+# When `agent_step` has to defensively force-close the bead, its returned
+# verdict is meaningless ("failed" by construction); the flow recovers the
+# real verdict from this artifact instead of stranding a passing PR.
+_VERDICT_FILE = "review-verdict-iter-{iter}.md"
+
+
+def _recover_critic_verdict(
+    run_dir: Path, iter_n: int, keywords: tuple[str, ...]
+) -> str:
+    """Parse the critic's durable verdict artifact for a ``pass``/``fail`` keyword.
+
+    Returns the first matching keyword (case-insensitive, mirroring
+    ``agent_step._result_from_closed_bead``), or ``""`` when the artifact is
+    absent or carries no recognised keyword. Used only when the iter bead was
+    force-closed — a transport failure, not a real verdict.
+    """
+    text = _read_text(run_dir / _VERDICT_FILE.format(iter=iter_n)).lower()
+    if not text:
+        return ""
+    for kw in keywords:
+        if kw.lower() in text:
+            return kw
+    return ""
 
 
 # ───────────────────── preview / demo knobs ─────────────────────────
@@ -261,6 +300,29 @@ def software_dev_agentic(
                 dry_run=dry_run,
             )
             critic_verdict = review.verdict
+            if not dry_run and review.closed_by == "force":
+                # The critic's iter bead was force-closed by the convergence
+                # ladder — a transport failure (e.g. the agent's `bd close`
+                # hit a swapped beads backend), NOT a real verdict. Recover
+                # the verdict from the durable artifact before declaring fail,
+                # so a passing PR isn't stranded by a close hiccup.
+                recovered = _recover_critic_verdict(run_dir, iter_n, ("pass", "fail"))
+                if recovered:
+                    logger.info(
+                        "agentic: iter %s critic bead force-closed; "
+                        "recovered verdict=%s from %s",
+                        iter_n,
+                        recovered,
+                        _VERDICT_FILE.format(iter=iter_n),
+                    )
+                    critic_verdict = recovered
+                else:
+                    logger.warning(
+                        "agentic: iter %s critic bead force-closed and no "
+                        "verdict artifact (%s) to recover from — treating as fail",
+                        iter_n,
+                        _VERDICT_FILE.format(iter=iter_n),
+                    )
             if dry_run:
                 # StubBackend never closes the bead with a real verdict (the
                 # convergence ladder force-closes it as "failed"). Treat the

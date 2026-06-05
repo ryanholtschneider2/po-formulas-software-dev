@@ -204,6 +204,114 @@ def test_dry_run_treats_critic_as_pass_and_closes_nothing(
     assert closed == []
 
 
+# ──────────── critic verdict-transport fallback (prefect-orchestration-2mbv) ───
+
+
+def test_recover_critic_verdict_reads_artifact(tmp_path: Path) -> None:
+    """`_recover_critic_verdict` parses the keyword off the durable artifact."""
+    run_dir = tmp_path
+    (run_dir / "review-verdict-iter-1.md").write_text("PASS — looks good\n")
+    assert ag._recover_critic_verdict(run_dir, 1, ("pass", "fail")) == "pass"
+    (run_dir / "review-verdict-iter-2.md").write_text("FAIL — tests red")
+    assert ag._recover_critic_verdict(run_dir, 2, ("pass", "fail")) == "fail"
+
+
+def test_recover_critic_verdict_empty_when_absent_or_no_keyword(
+    tmp_path: Path,
+) -> None:
+    """Missing artifact or no recognised keyword → empty (cannot recover)."""
+    assert ag._recover_critic_verdict(tmp_path, 1, ("pass", "fail")) == ""
+    (tmp_path / "review-verdict-iter-1.md").write_text("inconclusive, unsure")
+    assert ag._recover_critic_verdict(tmp_path, 1, ("pass", "fail")) == ""
+
+
+def _force_close_fake(calls: list[dict], run_dir: Path, artifact_verdict: str | None):
+    """agent_step double whose critic step force-closes (transport failure).
+
+    `artifact_verdict` (when not None) is written to the durable verdict
+    artifact, mimicking a critic that recorded its verdict before its
+    `bd close` shellout failed and the ladder force-closed the bead.
+    """
+
+    def fake(**kw: object) -> AgentStepResult:
+        calls.append(dict(kw))
+        step = kw.get("step")
+        bead = f"{kw['seed_id']}.{step}.iter{kw.get('iter_n')}"
+        if step == "review":
+            if artifact_verdict is not None:
+                (run_dir / f"review-verdict-iter-{kw.get('iter_n')}.md").write_text(
+                    f"{artifact_verdict.upper()} — recorded before close failed"
+                )
+            # Force-close shape: verdict is meaningless "failed", closed_by="force".
+            return AgentStepResult(bead_id=bead, verdict="failed", closed_by="force")
+        return AgentStepResult(bead_id=bead, verdict="complete", closed_by="agent")
+
+    return fake
+
+
+def test_force_close_recovers_pass_from_artifact_and_closes_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A force-closed critic bead with a PASS artifact must NOT strand the PR."""
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    run_dir = rig / ".planning" / "software-dev-agentic" / "seed-fc"
+    run_dir.mkdir(parents=True)
+
+    calls: list[dict] = []
+    closed: list[str] = []
+    monkeypatch.setattr(ag, "agent_step", _force_close_fake(calls, run_dir, "pass"))
+    _patch_common(monkeypatch, closed)
+
+    result = ag.software_dev_agentic.fn(
+        issue_id="seed-fc", rig="rig", rig_path=str(rig), iter_cap=1
+    )
+    assert result["critic_verdict"] == "pass"
+    assert closed == ["seed-fc"]
+
+
+def test_force_close_with_fail_artifact_still_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A force-close whose artifact says FAIL stays a fail (no false pass)."""
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    run_dir = rig / ".planning" / "software-dev-agentic" / "seed-ff"
+    run_dir.mkdir(parents=True)
+
+    calls: list[dict] = []
+    closed: list[str] = []
+    monkeypatch.setattr(ag, "agent_step", _force_close_fake(calls, run_dir, "fail"))
+    _patch_common(monkeypatch, closed)
+
+    with pytest.raises(RuntimeError, match="did not converge"):
+        ag.software_dev_agentic.fn(
+            issue_id="seed-ff", rig="rig", rig_path=str(rig), iter_cap=1
+        )
+    assert closed == []
+
+
+def test_force_close_without_artifact_treated_as_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No durable artifact → cannot recover → force-close stays a fail."""
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    run_dir = rig / ".planning" / "software-dev-agentic" / "seed-fn"
+    run_dir.mkdir(parents=True)
+
+    calls: list[dict] = []
+    closed: list[str] = []
+    monkeypatch.setattr(ag, "agent_step", _force_close_fake(calls, run_dir, None))
+    _patch_common(monkeypatch, closed)
+
+    with pytest.raises(RuntimeError, match="did not converge"):
+        ag.software_dev_agentic.fn(
+            issue_id="seed-fn", rig="rig", rig_path=str(rig), iter_cap=1
+        )
+    assert closed == []
+
+
 def test_flow_outcome_written_on_worker_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

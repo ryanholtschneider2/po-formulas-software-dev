@@ -23,6 +23,16 @@ If the diff artifact is missing, read the committed change directly — inspect 
 - `pass` — faithfully accomplishes the goal, tests green, rigor matches the ask, PR open (or a concrete reason none could be). The seed closes.
 - `fail` — does not accomplish the goal, tests red, or required rigor missing. **Write a concrete, numbered fix list to `{{run_dir}}/critique-iter-{{iter}}.md`** (the flow feeds it to the actor next turn) before closing.
 
+# Record your verdict durably, THEN close
+
+**Before** you close your iter bead, write your verdict to `{{run_dir}}/review-verdict-iter-{{iter}}.md` with the keyword (`PASS` or `FAIL`) as the first token on the first line, e.g.:
+
+```bash
+echo "PASS — <one-line rationale>" > {{run_dir}}/review-verdict-iter-{{iter}}.md
+```
+
+This is mandatory and not optional. The bead-close shellout can fail for reasons outside your control (a beads backend swapped mid-run, a transient CLI error); when that happens the orchestrator recovers your verdict from this file instead of stranding a passing change. A verdict that lives only in the close reason is lost if the close fails.
+
 You do NOT close the seed and you do NOT merge anything; you only close YOUR iter bead.
 
 Reply with one line: `review: <PASS|FAIL> — <one-line rationale>`.

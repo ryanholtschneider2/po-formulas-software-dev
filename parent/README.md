@@ -79,6 +79,14 @@ If it doesn't converge within `--iter-cap` iterations the flow raises and
 leaves run-dir artifacts at `<rig>/.planning/software-dev-agentic/<issue>/`
 for forensics.
 
+The critic records its verdict to `review-verdict-iter-<n>.md` **before**
+closing its iter bead. If the bead-close shellout fails (e.g. the rig's
+beads backend is swapped `dolt`→`br` mid-run and the old CLI loses its
+database), the convergence ladder force-closes the bead and its verdict is
+lost — so the flow falls back to reading that artifact. A force-close is a
+transport failure, not a verdict, and a passing PR is no longer stranded by
+a close hiccup.
+
 **Knobs:**
 
 | Flag | Default | Effect |

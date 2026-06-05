@@ -91,6 +91,19 @@ def test_critic_returns_pass_fail_and_fix_list() -> None:
         assert "critique-iter-" in _read(rel), f"{rel} missing critique artifact path"
 
 
+def test_critic_records_durable_verdict_artifact() -> None:
+    """Critic must write its verdict to review-verdict-iter-N.md before closing.
+
+    The flow recovers this artifact when the iter bead is force-closed (a
+    transport failure, not a real verdict) — prefect-orchestration-2mbv.
+    """
+    for rel in ("agentic-reviewer/prompt.md", "agentic-reviewer/task.md"):
+        raw = _read(rel)
+        assert "review-verdict-iter-{{iter}}.md" in raw, (
+            f"{rel} missing durable verdict artifact path"
+        )
+
+
 def test_critic_does_not_merge_and_scales_to_ask() -> None:
     text = _read("agentic-reviewer/prompt.md").lower()
     assert "size of the ask" in text or "right-sized" in text
