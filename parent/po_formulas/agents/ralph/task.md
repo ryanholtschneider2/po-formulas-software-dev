@@ -1,6 +1,6 @@
 You are the **cleaner** running the Ralph Wiggum pass on issue `{{issue_id}}` (ralph iter {{ralph_iter}}).
 
-**Paths.** Code lives in `{{pack_path}}` (`cd {{pack_path}}` before any edit / `git add` / `git commit`). The bead + run_dir live under `{{rig_path}}` — the verdict is stamped on your bead via `bd update --metadata`. When `{{pack_path}}` equals `{{rig_path}}` the two are the same directory.
+**Paths.** Code lives in `{{pack_path}}` (`cd {{pack_path}}` before any edit / `git add` / `git commit`). The bead + run_dir live under `{{rig_path}}` — the verdict is stamped on your bead via `po write-verdict` (backend-agnostic). When `{{pack_path}}` equals `{{rig_path}}` the two are the same directory.
 {{gate_failures_block}}
 Ask ONCE: is there a **meaningfully** cleaner way to implement this? Re-read the final diff (`git -C {{pack_path}} log --oneline -20` and the build diff at `{{run_dir}}/build-iter-*.diff`) and the decision log. Cleaner = simpler, fewer moving parts, closer to existing patterns — not stylistic nits.
 
@@ -17,13 +17,13 @@ Then reserve the files you'll edit via `mcp-agent-mail file_reservation_paths` w
 Then stamp the verdict on your bead:
 
 ```bash
-bd update {{role_step_bead_id}} --metadata '{"po.ralph": {"ralph_found_improvement": false}}'
+po write-verdict --bead-id {{role_step_bead_id}} --name ralph --payload '{"ralph_found_improvement": false}'
 ```
 
 On refactor:
 
 ```bash
-bd update {{role_step_bead_id}} --metadata '{"po.ralph": {"ralph_found_improvement": true, "summary": "extracted X helper; dropped Y layer"}}'
+po write-verdict --bead-id {{role_step_bead_id}} --name ralph --payload '{"ralph_found_improvement": true, "summary": "extracted X helper; dropped Y layer"}'
 ```
 
 The flow re-enters this step up to the ralph cap as long as you keep finding meaningful improvements.

@@ -13,23 +13,20 @@ Treat any pre-existing failure recorded in `{{run_dir}}/baseline.txt` as **NOT a
 
 # REQUIRED FINAL STEP — DO NOT SKIP
 
-Your turn is **not complete** until the verdict is stamped on your bead. The orchestrator reads bead metadata key `po.full_test_gate` to decide between (a) closing the seed and (b) routing failures back to ralph for a fix-up turn. Run the right bash command verbatim as the **last action** before returning, then verify with `bd show`:
+Your turn is **not complete** until the verdict is stamped on your bead. The orchestrator reads the `po.full_test_gate` verdict to decide between (a) closing the seed and (b) routing failures back to ralph for a fix-up turn. Run the right bash command verbatim as the **last action** before returning. `po write-verdict` routes to the rig's beads backend (dolt or br) automatically:
 
 On a clean pass:
 
 ```bash
-bd update {{role_step_bead_id}} --metadata '{"po.full_test_gate": {"passed": true, "summary": "all enabled layers green vs baseline"}}'
+po write-verdict --bead-id {{role_step_bead_id}} --name full_test_gate --payload '{"passed": true, "summary": "all enabled layers green vs baseline"}'
 ```
 
 On failure (one or more newly-failing tests):
 
 ```bash
-bd update {{role_step_bead_id}} --metadata '{"po.full_test_gate": {"passed": false, "failures": ["tests/test_x.py::test_a", "tests/test_y.py::test_b"], "summary": "two newly-failing tests after iter loop"}}'
+po write-verdict --bead-id {{role_step_bead_id}} --name full_test_gate --payload '{"passed": false, "failures": ["tests/test_x.py::test_a", "tests/test_y.py::test_b"], "summary": "two newly-failing tests after iter loop"}'
 ```
 
-Verify it landed:
-```bash
-bd show {{role_step_bead_id}} --json | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)[0]['metadata'].get('po.full_test_gate'), indent=2))"
-```
+On success the command prints `wrote po.full_test_gate verdict on {{role_step_bead_id}} via <backend>` and exits non-zero if the write fails — that line is your confirmation it landed.
 
 Always populate `failures` with the **newly** failing test node IDs (not the baseline-already-broken ones). The ralph fix-up turn reads this list verbatim.

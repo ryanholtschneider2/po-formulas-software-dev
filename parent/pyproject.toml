@@ -35,6 +35,7 @@ agent-cli-present = "po_formulas.checks:selected_agent_cli_present"
 [project.entry-points."po.commands"]
 summarize-verdicts = "po_formulas.commands:summarize_verdicts"
 planning-init = "po_formulas.commands:planning_init"
+write-verdict = "po_formulas.commands:write_verdict"
 
 [build-system]
 requires = ["hatchling"]

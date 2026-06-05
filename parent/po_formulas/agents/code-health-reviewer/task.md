@@ -95,16 +95,17 @@ Aim for **5–25 findings** per run. Fewer than 5 means you didn't look hard eno
 
 # Stamp the verdict on your bead
 
+`po write-verdict` routes to the rig's beads backend (dolt or br) automatically:
+
 ```bash
-bd update {{role_step_bead_id}} --metadata '{"po.code_health": {"verdict": "complete", "findings_count": <int>, "summary": "<copy of proposals.json summary>"}}'
+po write-verdict --bead-id {{role_step_bead_id}} --name code_health --payload '{"verdict": "complete", "findings_count": <int>, "summary": "<copy of proposals.json summary>"}'
 ```
 
-Verify:
+Verify (the command prints `wrote po.code_health verdict on {{role_step_bead_id}} via <backend>` and exits non-zero on a failed write — that line confirms the verdict landed):
 
 ```bash
 ls {{run_dir}}/proposals.json
 python3 -c "import json; d=json.load(open('{{run_dir}}/proposals.json')); assert d.get('findings'); print('OK', len(d['findings']))"
-bd show {{role_step_bead_id}} --json | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)[0]['metadata'].get('po.code_health'), indent=2))"
 ```
 
 If the schema doesn't validate, fix the file before closing — the orchestrator will fail loudly otherwise. (Note: `proposals.json` is a separate artifact, not a verdict — it stays on disk as the canonical finding list.)
