@@ -53,7 +53,7 @@ def _fake_agent_step(calls: list[dict], critic_verdicts: list[str]):
     def fake(**kw: object) -> AgentStepResult:
         calls.append(dict(kw))
         step = kw.get("step")
-        bead = f"{kw['seed_id']}.{step}.iter{kw.get('iter_n')}"
+        bead = f"{kw['seed_id']}-{step}-iter{kw.get('iter_n')}"
         if step == "review":
             verdict = seq.pop(0) if seq else "fail"
             return AgentStepResult(bead_id=bead, verdict=verdict, closed_by="agent")
@@ -131,7 +131,7 @@ def test_critic_fail_then_pass_iterates_and_feeds_fix_list(
     def fake(**kw: object) -> AgentStepResult:
         calls.append(dict(kw))
         step = kw.get("step")
-        bead = f"{kw['seed_id']}.{step}.iter{kw.get('iter_n')}"
+        bead = f"{kw['seed_id']}-{step}-iter{kw.get('iter_n')}"
         if step == "review":
             verdict = seq.pop(0)
             if verdict == "fail":

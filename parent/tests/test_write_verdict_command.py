@@ -57,7 +57,7 @@ def test_routes_to_backend_write_verdict_dolt(
     _install_fake_backend(monkeypatch, backend="dolt", calls=calls)
 
     write_verdict(
-        bead_id="seed.triage.iter1",
+        bead_id="seed-triage-iter1",
         name="triage",
         payload='{"has_ui": false, "complexity": "moderate"}',
         rig_path="/some/rig",
@@ -65,14 +65,14 @@ def test_routes_to_backend_write_verdict_dolt(
 
     assert len(calls) == 1
     call = calls[0]
-    assert call["bead_id"] == "seed.triage.iter1"
+    assert call["bead_id"] == "seed-triage-iter1"
     assert call["name"] == "triage"
     # Payload is parsed from JSON to a dict before the seam stamps it.
     assert call["payload"] == {"has_ui": False, "complexity": "moderate"}
     assert call["backend"] == "dolt"
     assert call["rig_path"] == "/some/rig"
     assert (
-        "wrote po.triage verdict on seed.triage.iter1 via dolt"
+        "wrote po.triage verdict on seed-triage-iter1 via dolt"
         in capsys.readouterr().out
     )
 
@@ -84,7 +84,7 @@ def test_routes_to_backend_write_verdict_br(
     _install_fake_backend(monkeypatch, backend="br", calls=calls)
 
     write_verdict(
-        bead_id="seed.full_test_gate.iter1",
+        bead_id="seed-full_test_gate-iter1",
         name="full_test_gate",
         payload='{"passed": true, "summary": "all green"}',
     )
