@@ -71,7 +71,12 @@ def summarize_verdicts(issue_id: str) -> None:
     items.sort(key=lambda t: (t[0], t[1], t[2]))
     for step, iter_n, key, value in items:
         if isinstance(value, dict):
-            verdict = str(value.get("verdict") or value.get("passed") or value.get("ralph_found_improvement") or "?")
+            verdict = str(
+                value.get("verdict")
+                or value.get("passed")
+                or value.get("ralph_found_improvement")
+                or "?"
+            )
             reason = value.get("reason") or value.get("summary") or ""
             first = str(reason).splitlines()[0] if reason else ""
         else:
@@ -79,6 +84,64 @@ def summarize_verdicts(issue_id: str) -> None:
             first = ""
         label = f"{step}-iter-{iter_n} {key.removeprefix('po.')}"
         print(f"  {label:38s}  {verdict:12s}  {first}")
+
+
+def write_verdict(
+    bead_id: str, name: str, payload: str, rig_path: str | None = None
+) -> None:
+    """Write a role's structured verdict onto its iter bead, backend-agnostically.
+
+    Routes through ``prefect_orchestration.beads_backend.write_verdict``, which
+    picks the write form from the rig's beads backend (``resolve_backend``):
+
+      - **dolt** — ``bd update <id> --set-metadata po.<name>=<json>``
+      - **br** — ``br comments add <id> 'po-verdict:<name>:<json>'``
+
+    Role prompts call ``po write-verdict ...`` instead of hardcoding
+    ``bd update --metadata`` so a verdict lands on either backend without the
+    role knowing which one the rig runs. The orchestrator reads it back via the
+    same seam (``parsing.read_bead_verdict``).
+
+    Args:
+        bead_id: the iter bead to stamp (e.g. ``<seed>.triage.iter1``).
+        name: verdict key *without* the ``po.`` prefix (``triage``, ``ralph``,
+            ``full_test_gate``, ``code_health``).
+        payload: a JSON object string — the verdict body (the value that used
+            to sit under the ``po.<name>`` key in the old ``--metadata`` form).
+        rig_path: rig root for backend resolution + the shellout cwd; defaults
+            to the current directory.
+
+    Prints a one-line confirmation naming the resolved backend on success;
+    exits non-zero (with a diagnostic) on bad JSON or a failed write.
+    """
+    # Lazy import: a rig running an older core (pre-`beads_backend`) can still
+    # load this module for the other commands; only `write-verdict` needs it.
+    try:
+        from prefect_orchestration.beads_backend import (
+            resolve_backend,
+            write_verdict as _backend_write_verdict,
+        )
+    except ImportError as exc:
+        print(
+            "error: this core lacks prefect_orchestration.beads_backend "
+            f"(need the backend-agnostic verdict seam): {exc}"
+        )
+        raise SystemExit(2) from exc
+
+    rp = rig_path or "."
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        print(f"error: --payload is not valid JSON: {exc}")
+        raise SystemExit(2) from exc
+
+    backend = resolve_backend(rp)
+    try:
+        _backend_write_verdict(bead_id, name, parsed, backend=backend, rig_path=rp)
+    except (RuntimeError, NotImplementedError) as exc:
+        print(f"error: write_verdict for {bead_id}.{name} failed ({backend}): {exc}")
+        raise SystemExit(1) from exc
+    print(f"wrote po.{name} verdict on {bead_id} via {backend}")
 
 
 def planning_init(kind: str, slug: str, title: str | None = None) -> None:

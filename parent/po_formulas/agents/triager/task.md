@@ -68,16 +68,13 @@ Write a one-paragraph summary + flags to `{{run_dir}}/triage.md`:
 
 # Stamp the verdict on your bead
 
-The flow body reads bead metadata key `po.triage` to decide what runs. Write JSON booleans (`true`/`false`, lowercase). `bd update --metadata` does a per-key upsert — it preserves other metadata (`po.run_dir`, `po.rig_path`) untouched.
+The flow body reads the `po.triage` verdict to decide what runs. Write JSON booleans (`true`/`false`, lowercase). `po write-verdict` upserts just this verdict and routes to the rig's beads backend (dolt or br) automatically — you don't need to know which.
 
 ```bash
-bd update {{role_step_bead_id}} --metadata '{"po.triage": {"has_ui": false, "has_backend": true, "needs_migration": false, "is_docs_only": false, "complexity": "moderate"}}'
+po write-verdict --bead-id {{role_step_bead_id}} --name triage --payload '{"has_ui": false, "has_backend": true, "needs_migration": false, "is_docs_only": false, "complexity": "moderate"}'
 ```
 
-Verify it landed:
-```bash
-bd show {{role_step_bead_id}} --json | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)[0]['metadata'].get('po.triage'), indent=2))"
-```
+On success the command prints `wrote po.triage verdict on {{role_step_bead_id}} via <backend>` and exits non-zero if the write fails — that line is your confirmation it landed.
 
 # Done — close your bead
 
