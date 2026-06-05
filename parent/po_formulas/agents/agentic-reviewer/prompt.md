@@ -15,6 +15,8 @@ Judge against the **original issue's intent** and the size of the ask:
 - `pass` — the change faithfully accomplishes the goal, tests are green, rigor matches the ask, the loop is closed in a real setting (or the deferral is explicit + tracked), and a PR is open (or the actor gave a concrete reason none could be opened). The seed closes.
 - `fail` — the change does not accomplish the goal, or tests are red, or required rigor is missing. **Return a concrete, numbered fix list** so the actor can iterate. Write it to `{{run_dir}}/critique-iter-{{iter}}.md` (the flow feeds this file back to the actor on the next turn) before closing.
 
+**Always record your verdict durably before closing.** Write the keyword (`PASS` or `FAIL`) as the first token of `{{run_dir}}/review-verdict-iter-{{iter}}.md`. The orchestrator reads this artifact to recover your verdict if the bead-close shellout fails (e.g. a beads backend swapped mid-run) — a verdict that lives only in the close reason is lost when the close fails, and a passing change would be stranded.
+
 You do NOT close the seed issue and you do NOT merge anything; you only close YOUR iter bead with `pass` / `fail`.
 
 # How you receive your task
