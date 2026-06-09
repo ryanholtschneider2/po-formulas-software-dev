@@ -19,6 +19,7 @@ graph = "po_formulas.graph:graph_run"
 minimal-task = "po_formulas.minimal_task:minimal_task"
 code-health-review = "po_formulas.code_health:code_health_review"
 software-dev-agentic = "po_formulas.agentic:software_dev_agentic"
+agentic-epic = "po_formulas.agentic_epic:agentic_epic"
 
 # Scheduled / manual deployments (cron, interval, or no-schedule for UI-triggered).
 # Core's `po deploy` calls register() to collect RunnerDeployment objects.
