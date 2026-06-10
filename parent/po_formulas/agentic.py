@@ -164,6 +164,25 @@ def _bd_set_metadata(issue_id: str, key: str, value: str, rig_path: Path) -> Non
     )
 
 
+def _dispatch_pr_sheriff(rig_path: Path, issue_id: str, logger: Any) -> None:
+    """Fire the workspace's pr-sheriff deployment for this PR (best-effort).
+
+    The worker has opened a PR and the critic passed, so this is the natural
+    "PR opened" moment. po-director's ``on_pr_opened`` gates on the workspace
+    ``merge_mode`` (only ``auto`` / ``ai-approve-all`` dispatch) and hits the
+    standing ``pr-sheriff`` deployment. Optional + non-fatal: po-director may
+    not be installed, the rig may not be a Director workspace, or Prefect may
+    be unreachable — none of which should fail a completed software run.
+    """
+    try:
+        from po_director.sheriff_dispatch import on_pr_opened
+
+        if on_pr_opened(str(rig_path), issue_id):
+            logger.info("agentic: dispatched pr-sheriff for %s", issue_id)
+    except Exception as exc:  # noqa: BLE001 — sheriff dispatch is best-effort
+        logger.info("agentic: pr-sheriff dispatch skipped (%s)", exc)
+
+
 def _stamp_preview_url(issue_id: str, rig_path: Path, run_dir: Path) -> str:
     """Read ``<run_dir>/preview_url.txt`` and stamp ``po.preview_url``.
 
@@ -304,6 +323,12 @@ def software_dev_agentic(
                 notes=f"po software-dev-agentic complete: critic={critic_verdict}",
                 rig_path=rig_path_p,
             )
+
+        # The worker's PR is open and the critic passed — announce the PR to
+        # po-director, which fires the PR Sheriff iff the workspace is in an
+        # auto merge mode. Best-effort; never fails a completed run.
+        if not dry_run:
+            _dispatch_pr_sheriff(rig_path_p, issue_id, logger)
 
         return {
             "status": "completed",
