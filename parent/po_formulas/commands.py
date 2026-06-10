@@ -9,17 +9,17 @@ overhead per principle §4.
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from pathlib import Path
 
+from prefect_orchestration.beads_meta import iter_bead_re
 from prefect_orchestration.run_lookup import resolve_run_dir, RunDirNotFound
 
 
 def summarize_verdicts(issue_id: str) -> None:
     """Print a one-line summary per `po.*` metadata key across an issue's iter beads.
 
-    Walks every iter bead under the seed (`<seed>.<step>.iter<N>`) and
+    Walks every iter bead under the seed (`<seed>-<step>-iter<N>`) and
     prints one line per `po.<role>` metadata key found, sorted by step
     + iter index. Resolves the seed's rig_path via bd metadata so the
     `bd` shellout runs in the right rig.
@@ -48,7 +48,7 @@ def summarize_verdicts(issue_id: str) -> None:
         print(f"bd list returned unparseable JSON: {exc}")
         return
 
-    iter_pat = re.compile(rf"^{re.escape(issue_id)}\.(.+?)\.iter(\d+)$")
+    iter_pat = iter_bead_re(issue_id)
     items = []
     for row in rows or []:
         if not isinstance(row, dict):
@@ -103,7 +103,7 @@ def write_verdict(
     same seam (``parsing.read_bead_verdict``).
 
     Args:
-        bead_id: the iter bead to stamp (e.g. ``<seed>.triage.iter1``).
+        bead_id: the iter bead to stamp (e.g. ``<seed>-triage-iter1``).
         name: verdict key *without* the ``po.`` prefix (``triage``, ``ralph``,
             ``full_test_gate``, ``code_health``).
         payload: a JSON object string — the verdict body (the value that used
