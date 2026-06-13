@@ -43,6 +43,7 @@ stamps ``po.run_dir``) so dashboard cards can link the preview.
 
 from __future__ import annotations
 
+import importlib
 import os
 import subprocess
 from pathlib import Path
@@ -168,19 +169,31 @@ def _dispatch_pr_sheriff(rig_path: Path, issue_id: str, logger: Any) -> None:
     """Fire the workspace's pr-sheriff deployment for this PR (best-effort).
 
     The worker has opened a PR and the critic passed, so this is the natural
-    "PR opened" moment. po-director's ``on_pr_opened`` gates on the workspace
-    ``merge_mode`` (only ``auto`` / ``ai-approve-all`` dispatch) and hits the
-    standing ``pr-sheriff`` deployment. Optional + non-fatal: po-director may
-    not be installed, the rig may not be a Director workspace, or Prefect may
-    be unreachable — none of which should fail a completed software run.
+    "PR opened" moment. Prefers SoloCo's own ``soloco-sheriff`` (the independent
+    SoloCo runtime) and falls back to po-director's ``pr-sheriff``. Each
+    ``on_pr_opened`` gates on the workspace ``merge_mode`` (only ``auto`` /
+    ``ai-approve-all`` dispatch) **and** on its own standing deployment existing
+    for the rig, so a SoloCo workspace routes to ``soloco-sheriff`` while a
+    Director workspace routes to ``pr-sheriff`` — whichever owns the rig fires,
+    and the first that dispatches wins (never both). Optional + non-fatal: a
+    pack may not be installed, the rig may not be a managed workspace, or
+    Prefect may be unreachable — none of which should fail a completed run.
     """
-    try:
-        from po_director.sheriff_dispatch import on_pr_opened
-
-        if on_pr_opened(str(rig_path), issue_id):
-            logger.info("agentic: dispatched pr-sheriff for %s", issue_id)
-    except Exception as exc:  # noqa: BLE001 — sheriff dispatch is best-effort
-        logger.info("agentic: pr-sheriff dispatch skipped (%s)", exc)
+    for module_name, label in (
+        ("po_soloco.sheriff_dispatch", "soloco-sheriff"),
+        ("po_director.sheriff_dispatch", "pr-sheriff"),
+    ):
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:  # noqa: BLE001 — pack may not be installed
+            logger.info("agentic: %s unavailable (%s)", label, exc)
+            continue
+        try:
+            if module.on_pr_opened(str(rig_path), issue_id):
+                logger.info("agentic: dispatched %s for %s", label, issue_id)
+                return
+        except Exception as exc:  # noqa: BLE001 — sheriff dispatch is best-effort
+            logger.info("agentic: %s dispatch skipped (%s)", label, exc)
 
 
 def _stamp_preview_url(issue_id: str, rig_path: Path, run_dir: Path) -> str:
