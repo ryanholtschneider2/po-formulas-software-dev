@@ -162,8 +162,33 @@ def create_integration_branch(
         ):
             start_point = f"origin/{base_branch}"
 
-    _git(["branch", branch, start_point], cwd=repo)
-    logger.info("shared-branch: created %s off %s", branch, start_point)
+    # Seed the branch with one empty commit so it diverges from base by a
+    # commit. gh refuses to open a PR for a branch with nothing ahead of base
+    # ("No commits between main and epic/<id>"), which strands the whole epic's
+    # integrated work behind a PR that was never opened. The seed is harmless:
+    # the final squash-merge of the epic PR collapses it away. `-c user.*` keeps
+    # commit-tree working in headless/agent contexts where git identity is unset.
+    start_sha = _git(["rev-parse", "--verify", start_point], cwd=repo).stdout.strip()
+    tree = _git(
+        ["rev-parse", "--verify", f"{start_point}^{{tree}}"], cwd=repo
+    ).stdout.strip()
+    seed = _git(
+        [
+            "-c",
+            "user.name=po-agentic-epic",
+            "-c",
+            "user.email=po@local",
+            "commit-tree",
+            tree,
+            "-p",
+            start_sha,
+            "-m",
+            f"chore: open {branch} integration branch",
+        ],
+        cwd=repo,
+    ).stdout.strip()
+    _git(["branch", branch, seed], cwd=repo)
+    logger.info("shared-branch: created %s off %s (seeded)", branch, start_point)
 
     pushed = False
     if remote:

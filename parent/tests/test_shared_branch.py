@@ -79,8 +79,11 @@ def test_create_integration_branch_off_remote_base(monkeypatch, tmp_path):
         "pushed": True,
         "remote": True,
     }
-    # Cut off the fetched remote tip, then pushed.
-    assert fake.ran("branch", "epic/rig-e1", "origin/main")
+    # Seed an empty commit off the fetched remote tip (so the branch diverges
+    # from base and a draft PR is openable), point the branch at it, then push.
+    assert fake.ran("rev-parse", "--verify", "origin/main")
+    assert fake.ran("commit-tree", "epic/rig-e1")
+    assert fake.ran("branch", "epic/rig-e1")
     assert fake.ran("push", "-u", "origin", "epic/rig-e1")
 
 
@@ -115,9 +118,32 @@ def test_create_integration_branch_local_only(monkeypatch, tmp_path):
         "pushed": False,
         "remote": False,
     }
-    # No remote → branch cut off the local base, never pushed.
-    assert fake.ran("branch", "epic/rig-e1", "main")
+    # No remote → branch seeded off the local base, never pushed.
+    assert fake.ran("commit-tree", "epic/rig-e1")
+    assert fake.ran("branch", "epic/rig-e1")
     assert not fake.ran("push")
+
+
+def test_create_integration_branch_seeds_divergent_commit(monkeypatch, tmp_path):
+    """The created branch must carry a seed commit so it is ahead of base —
+    gh won't open a PR for a branch with no commits between it and main."""
+    fake = FakeRun(
+        {
+            "remote": (0, "origin\n", ""),
+            "rev-parse --verify --quiet refs/heads/epic/": (1, "", ""),  # absent
+            "rev-parse --verify --quiet refs/remotes/origin/main": (0, "base\n", ""),
+            "^{tree}": (0, "treesha\n", ""),
+            "rev-parse --verify origin/main": (0, "basesha\n", ""),
+            "commit-tree": (0, "seedsha\n", ""),
+        }
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    sb.create_integration_branch(tmp_path, "rig-e1", base_branch="main")
+
+    # Seed commit is parented on the base tip, and the branch points at the seed.
+    assert fake.ran("commit-tree", "treesha", "-p", "basesha")
+    assert fake.ran("branch", "epic/rig-e1", "seedsha")
 
 
 # ── open_draft_pr / mark_pr_ready ────────────────────────────────────────────
