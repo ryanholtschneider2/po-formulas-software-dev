@@ -199,6 +199,55 @@ def test_setup_worktree_idempotent(rig: Path):
     assert wt1.is_dir()
 
 
+def test_setup_worktree_scrubs_dirty_reuse(rig: Path):
+    """Reusing an existing worktree resets it to the branch tip and removes
+    untracked debris from a prior killed run (the po-formulas-software-dev-vbz
+    bug: leftover modifications carried into resumed runs)."""
+    wt = setup_worktree(rig, "demo")
+    # Simulate a prior run's leftover state: a modified tracked file + an
+    # untracked file/dir entirely out of this bead's scope.
+    (wt / "a.txt").write_text("LEFTOVER MODIFICATION\n")
+    (wt / "junk.py").write_text("junk = 1\n")
+    (wt / "stray_dir").mkdir()
+    (wt / "stray_dir" / "nested.txt").write_text("nested junk\n")
+    assert _git("status", "--porcelain", cwd=wt).stdout.strip()
+
+    setup_worktree(rig, "demo")  # reuse → should scrub
+
+    assert (wt / "a.txt").read_text() == "hello\n", "tracked file not reset"
+    assert not (wt / "junk.py").exists(), "untracked file not cleaned"
+    assert not (wt / "stray_dir").exists(), "untracked dir not cleaned"
+    assert not _git("status", "--porcelain", cwd=wt).stdout.strip(), "tree not clean"
+
+
+def test_setup_worktree_scrub_preserves_shared_dirs(rig: Path):
+    """The scrub honors the per-worktree exclude rules, so the shared
+    `.beads`/`.planning` symlinks survive (they're never debris)."""
+    wt = setup_worktree(rig, "demo")
+    (wt / "junk.txt").write_text("junk\n")
+
+    setup_worktree(rig, "demo")  # reuse → scrub
+
+    assert not (wt / "junk.txt").exists()
+    assert (wt / ".beads").is_symlink()
+    assert (wt / ".beads").resolve() == (rig / ".beads").resolve()
+    assert (wt / ".planning").is_symlink()
+    assert (wt / ".planning").resolve() == (rig / ".planning").resolve()
+
+
+def test_setup_worktree_reuse_dirty_env_preserves_state(rig: Path, monkeypatch):
+    """PO_WTS_REUSE_DIRTY=1 opts out of the scrub — dirty state is kept."""
+    wt = setup_worktree(rig, "demo")
+    (wt / "a.txt").write_text("KEEP ME\n")
+    (wt / "wip.py").write_text("wip = 1\n")
+
+    monkeypatch.setenv("PO_WTS_REUSE_DIRTY", "1")
+    setup_worktree(rig, "demo")  # reuse → must NOT scrub
+
+    assert (wt / "a.txt").read_text() == "KEEP ME\n"
+    assert (wt / "wip.py").exists()
+
+
 def test_setup_worktree_creates_shared_dirs_when_missing(tmp_path: Path):
     """Missing .beads/.planning in main rig are created + symlinked (not skipped)."""
     repo = tmp_path / "rig"
