@@ -130,7 +130,12 @@ def test_agentic_epic_creates_stamped_children_and_dispatches(tmp_path, monkeypa
     monkeypatch.setattr(ae, "close_issue", lambda i, **k: closed.append(i))
 
     result = ae.agentic_epic.fn(
-        epic_id=epic_id, rig="rig", rig_path=str(rig_path), iter_cap=2, plan_iter_cap=2
+        epic_id=epic_id,
+        rig="rig",
+        rig_path=str(rig_path),
+        iter_cap=2,
+        plan_iter_cap=2,
+        shared_branch=False,  # exercise the legacy per-child-PR path explicitly
     )
 
     # One bead per child, parented under the epic.
@@ -263,16 +268,51 @@ def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypa
     assert result["pr"]["url"] == "https://x/pull/9"
 
 
-def test_agentic_epic_default_off_does_not_touch_shared_branch(tmp_path, monkeypatch):
-    """Default OFF must not create a branch / PR and must dispatch with no
-    extra_formula_kwargs (the existing per-child-PR path, unchanged)."""
+def test_agentic_epic_default_is_shared_branch(tmp_path, monkeypatch):
+    """The default (no shared_branch kwarg) now lands the epic on ONE integration
+    branch + draft PR — shared-branch is the dispatch path, not opt-in."""
+    epic_id = "rig-epic-default"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {"children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]}
+    _patch_common(monkeypatch, run_dir, plan)
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        ae.sb, "create_integration_branch",
+        lambda rp, eid, **k: seen.__setitem__("create", str(eid))
+        or {"branch": f"epic/{eid}", "created": True, "pushed": True, "remote": True},
+    )
+    monkeypatch.setattr(
+        ae.sb, "open_draft_pr",
+        lambda rp, **k: {"opened": True, "url": "https://x/pull/1", "reason": ""},
+    )
+    monkeypatch.setattr(ae.sb, "mark_pr_ready", lambda rp, **k: {"ready": True, "reason": ""})
+    monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
+    dispatched: dict = {}
+    monkeypatch.setattr(ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"})
+
+    # No shared_branch kwarg → default path.
+    result = ae.agentic_epic.fn(epic_id=epic_id, rig="rig", rig_path=str(tmp_path))
+
+    assert seen["create"] == epic_id
+    assert result["shared_branch"] is True
+    assert result["epic_branch"] == f"epic/{epic_id}"
+    assert dispatched["extra_formula_kwargs"] == {
+        "epic_branch": f"epic/{epic_id}",
+        "parent_epic_id": epic_id,
+    }
+
+
+def test_agentic_epic_shared_branch_false_opts_out(tmp_path, monkeypatch):
+    """shared_branch=False must NOT create a branch / PR and must dispatch with no
+    extra_formula_kwargs (the legacy per-child-PR path, unchanged)."""
     epic_id = "rig-epic2"
     run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
     plan = {"children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]}
     _patch_common(monkeypatch, run_dir, plan)
 
     def boom(*a, **k):
-        pytest.fail("default-off must not call shared_branch transport")
+        pytest.fail("opt-out must not call shared_branch transport")
 
     monkeypatch.setattr(ae.sb, "create_integration_branch", boom)
     monkeypatch.setattr(ae.sb, "open_draft_pr", boom)
@@ -281,7 +321,9 @@ def test_agentic_epic_default_off_does_not_touch_shared_branch(tmp_path, monkeyp
     dispatched: dict = {}
     monkeypatch.setattr(ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"})
 
-    result = ae.agentic_epic.fn(epic_id=epic_id, rig="rig", rig_path=str(tmp_path))
+    result = ae.agentic_epic.fn(
+        epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=False
+    )
 
     assert dispatched["extra_formula_kwargs"] is None
     assert result["shared_branch"] is False
@@ -314,3 +356,214 @@ def test_agentic_epic_shared_branch_dry_run(tmp_path, monkeypatch):
     assert result["shared_branch"] is True
     assert result["epic_branch"] == f"epic/{epic_id}"
     assert result["lanes"] == [["1", "2"], ["3"]]
+
+
+# ── _parse_plan: touches + per-child formula ─────────────────────────────────
+
+
+def test_parse_plan_accepts_touches_and_formula(tmp_path):
+    _write_plan(
+        tmp_path,
+        {
+            "children": [
+                {
+                    "key": "1",
+                    "title": "t",
+                    "description": "d",
+                    "touches": ["./parent/foo.py", "parent/bar.py/"],
+                    "formula": "minimal-task",
+                },
+                {"key": "2", "title": "u", "description": "d"},  # defaults
+            ]
+        },
+    )
+    plan = ae._parse_plan(tmp_path, max_children=12)
+    # Leading ./ and trailing / normalized for stable coupling comparison.
+    assert plan[0]["touches"] == ["parent/foo.py", "parent/bar.py"]
+    assert plan[0]["formula"] == "minimal-task"
+    # Omitted touches/formula default sanely.
+    assert plan[1]["touches"] == []
+    assert plan[1]["formula"] == "software-dev-agentic"
+
+
+def test_parse_plan_rejects_non_list_touches(tmp_path):
+    _write_plan(
+        tmp_path,
+        {"children": [{"key": "1", "title": "t", "description": "d", "touches": "foo.py"}]},
+    )
+    with pytest.raises(ValueError, match="non-list 'touches'"):
+        ae._parse_plan(tmp_path, max_children=12)
+
+
+# ── _coupling_map + _blocks_edges (blocks-only-between-coupled) ───────────────
+
+
+def test_coupling_map_pairs_only_shared_file_children():
+    plan = [
+        {"key": "1", "touches": ["a.py", "b.py"], "depends_on": []},
+        {"key": "2", "touches": ["b.py"], "depends_on": []},  # shares b.py with 1
+        {"key": "3", "touches": ["c.py"], "depends_on": []},  # disjoint
+        {"key": "4", "touches": [], "depends_on": []},  # no surfaces → couples w/ none
+    ]
+    assert ae._coupling_map(plan) == [("1", "2")]
+
+
+def test_blocks_edges_auto_serializes_coupled_but_unordered():
+    # 1 and 2 share a file but the planner left them independent → the flow must
+    # add a blocks edge so they stack; 3 is disjoint and stays parallel.
+    plan = [
+        {"key": "1", "touches": ["shared.py"], "depends_on": []},
+        {"key": "2", "touches": ["shared.py"], "depends_on": []},
+        {"key": "3", "touches": ["other.py"], "depends_on": []},
+    ]
+    edges = ae._blocks_edges(plan)
+    # higher key stacks after lower for a coupled pair.
+    assert ("2", "1") in edges
+    # no edge touches the independent child 3.
+    assert all("3" not in e for e in edges)
+
+
+def test_blocks_edges_no_edges_between_independent_children():
+    plan = [
+        {"key": "1", "touches": ["a.py"], "depends_on": []},
+        {"key": "2", "touches": ["b.py"], "depends_on": []},
+    ]
+    assert ae._blocks_edges(plan) == []
+
+
+def test_blocks_edges_preserves_declared_dep_and_skips_already_ordered():
+    # 1 and 2 share a file AND the planner already declared 2 depends_on 1 → keep
+    # the one declared edge, do NOT add a duplicate/reverse coupling edge.
+    plan = [
+        {"key": "1", "touches": ["shared.py"], "depends_on": []},
+        {"key": "2", "touches": ["shared.py"], "depends_on": ["1"]},
+    ]
+    assert ae._blocks_edges(plan) == [("2", "1")]
+
+
+def test_blocks_edges_respects_transitive_ordering():
+    # 1↔3 share a file but are already ordered transitively (3→2→1); no new edge.
+    plan = [
+        {"key": "1", "touches": ["x.py"], "depends_on": []},
+        {"key": "2", "touches": ["m.py"], "depends_on": ["1"]},
+        {"key": "3", "touches": ["x.py"], "depends_on": ["2"]},
+    ]
+    assert ae._blocks_edges(plan) == [("2", "1"), ("3", "2")]
+
+
+# ── PRD phase + plan-critic loop ─────────────────────────────────────────────
+
+
+def test_prd_runs_before_decomposition(tmp_path, monkeypatch):
+    """The PRD step must execute before the planner step (it scopes the goal the
+    planner decomposes)."""
+    epic_id = "rig-prd1"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {"children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]}
+    order: list[str] = []
+
+    def fake_agent_step(*, agent_dir, step, **kwargs):
+        order.append(step)
+        if step == "epic-plan":
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / ae._PLAN_FILE).write_text(json.dumps(plan))
+        return type("R", (), {"verdict": "pass", "closed_by": "agent"})()
+
+    monkeypatch.setattr(ae, "get_run_logger", lambda: _NULL_LOGGER)
+    monkeypatch.setattr(ae, "agent_step", fake_agent_step)
+    monkeypatch.setattr(ae, "_bd_show_description", lambda *a, **k: "goal")
+    monkeypatch.setattr(ae, "graph_run", lambda **k: pytest.fail("dry-run must not dispatch"))
+
+    ae.agentic_epic.fn(epic_id=epic_id, rig="r", rig_path=str(tmp_path), dry_run=True)
+
+    assert order[0] == "epic-prd"
+    assert "epic-plan" in order
+    assert order.index("epic-prd") < order.index("epic-plan")
+
+
+def test_plan_critic_loop_iterates_on_bad_plan(tmp_path, monkeypatch):
+    """A deliberately-bad first plan is rejected (critic fail), the planner is
+    re-invoked with the revision note, and the second pass passes."""
+    epic_id = "rig-iter1"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    good_plan = {"children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]}
+
+    planner_iters: list[int] = []
+    revision_notes: list[str] = []
+    critic_calls = {"n": 0}
+
+    def fake_agent_step(*, agent_dir, step, ctx=None, iter_n=None, **kwargs):
+        if step == "epic-plan":
+            planner_iters.append(iter_n)
+            revision_notes.append((ctx or {}).get("revision_note", ""))
+            (run_dir / ae._PLAN_FILE).write_text(json.dumps(good_plan))
+            return type("R", (), {"verdict": "complete", "closed_by": "agent"})()
+        if step == "epic-plan-critic":
+            critic_calls["n"] += 1
+            # FAIL the first iteration, PASS the second.
+            verdict = "fail" if critic_calls["n"] == 1 else "pass"
+            (run_dir / f"critique-epic-plan-iter-{iter_n}.md").write_text(
+                "FAIL: child 1 is too vague" if verdict == "fail" else "PASS"
+            )
+            return type("R", (), {"verdict": verdict, "closed_by": "agent"})()
+        return type("R", (), {"verdict": "complete", "closed_by": "agent"})()
+
+    _patch_common(monkeypatch, run_dir, good_plan)
+    monkeypatch.setattr(ae, "agent_step", fake_agent_step)
+    monkeypatch.setattr(
+        ae.sb, "create_integration_branch",
+        lambda rp, eid, **k: {"branch": f"epic/{eid}", "created": True, "pushed": True, "remote": True},
+    )
+    monkeypatch.setattr(
+        ae.sb, "open_draft_pr",
+        lambda rp, **k: {"opened": True, "url": "https://x/pull/2", "reason": ""},
+    )
+    monkeypatch.setattr(ae.sb, "mark_pr_ready", lambda rp, **k: {"ready": True, "reason": ""})
+    monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
+    monkeypatch.setattr(ae, "graph_run", lambda **k: {"status": "ok"})
+
+    result = ae.agentic_epic.fn(
+        epic_id=epic_id, rig="r", rig_path=str(tmp_path), plan_iter_cap=2
+    )
+
+    # Planner ran twice; the second invocation carried the critic's fix list.
+    assert planner_iters == [1, 2]
+    assert "child 1 is too vague" in revision_notes[1]
+    assert critic_calls["n"] == 2
+    assert result["status"] == "completed"
+
+
+def test_per_child_formula_is_stamped(tmp_path, monkeypatch):
+    """A child carrying its own formula (minimal-task) is stamped with it, not the
+    default — formula-per-bead-size."""
+    epic_id = "rig-fmt1"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {
+        "children": [
+            {"key": "1", "title": "big", "description": "d", "depends_on": []},
+            {
+                "key": "2",
+                "title": "trivial link",
+                "description": "d",
+                "depends_on": [],
+                "formula": "minimal-task",
+            },
+        ]
+    }
+    _patch_common(monkeypatch, run_dir, plan)
+    stamped: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(ae, "_bd_set_metadata", lambda i, k, v, rp: stamped.append((i, k, v)))
+    monkeypatch.setattr(
+        ae.sb, "create_integration_branch",
+        lambda rp, eid, **k: {"branch": f"epic/{eid}", "created": True, "pushed": True, "remote": True},
+    )
+    monkeypatch.setattr(ae.sb, "open_draft_pr", lambda rp, **k: {"opened": True, "url": "u", "reason": ""})
+    monkeypatch.setattr(ae.sb, "mark_pr_ready", lambda rp, **k: {"ready": True, "reason": ""})
+    monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
+    monkeypatch.setattr(ae, "graph_run", lambda **k: {"status": "ok"})
+
+    ae.agentic_epic.fn(epic_id=epic_id, rig="r", rig_path=str(tmp_path))
+
+    assert (f"{epic_id}.1", "po.formula", "software-dev-agentic") in stamped
+    assert (f"{epic_id}.2", "po.formula", "minimal-task") in stamped
