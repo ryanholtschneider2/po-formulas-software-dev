@@ -437,3 +437,45 @@ class _NullLogger:
     def info(self, *_a: Any, **_k: Any) -> None: ...
     def warning(self, *_a: Any, **_k: Any) -> None: ...
     def error(self, *_a: Any, **_k: Any) -> None: ...
+
+
+def test_dispatch_nodes_forwards_extra_formula_kwargs_when_accepted() -> None:
+    """`extra_formula_kwargs` (e.g. shared-branch's epic_branch/parent_epic_id)
+    reach formulas that declare them, and are dropped for formulas that don't."""
+    nodes = [{"id": "A", "status": "open", "block_deps": []}]
+    captured: list[dict[str, Any]] = []
+
+    def accepts(*, issue_id, rig, rig_path, epic_branch=None, parent_epic_id=None, **_):
+        return {"issue_id": issue_id}
+
+    with patch.object(graph_mod._run_node_task, "submit",
+                      side_effect=_make_capturing_submit(captured)):
+        graph_mod._dispatch_nodes(
+            nodes=nodes, rig="r", rig_path="/tmp/rig",
+            formula_callable=accepts, parent_bead="root", iter_caps={},
+            dry_run=False, max_issues=None, logger=_NullLogger(),
+            extra_formula_kwargs={"epic_branch": "epic/e1", "parent_epic_id": "e1"},
+        )
+    assert captured[0]["kwargs"]["epic_branch"] == "epic/e1"
+    assert captured[0]["kwargs"]["parent_epic_id"] == "e1"
+
+
+def test_dispatch_nodes_drops_extra_kwargs_formula_does_not_accept() -> None:
+    nodes = [{"id": "A", "status": "open", "block_deps": []}]
+    captured: list[dict[str, Any]] = []
+
+    def rejects(*, issue_id, rig, rig_path, **_):  # no epic_branch param
+        return {"issue_id": issue_id}
+
+    with patch.object(graph_mod._run_node_task, "submit",
+                      side_effect=_make_capturing_submit(captured)):
+        graph_mod._dispatch_nodes(
+            nodes=nodes, rig="r", rig_path="/tmp/rig",
+            formula_callable=rejects, parent_bead="root", iter_caps={},
+            dry_run=False, max_issues=None, logger=_NullLogger(),
+            extra_formula_kwargs={"epic_branch": "epic/e1"},
+        )
+    # **_ would technically swallow it, but the dispatcher filters on named
+    # params, so a formula whose signature doesn't *name* epic_branch never
+    # receives it (matches the iter_caps contract).
+    assert "epic_branch" not in captured[0]["kwargs"]

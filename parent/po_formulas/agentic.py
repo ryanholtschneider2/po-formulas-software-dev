@@ -53,6 +53,7 @@ from prefect import flow, get_run_logger
 from prefect_orchestration.agent_step import agent_step
 from prefect_orchestration.beads_meta import claim_issue, close_issue
 
+from po_formulas import shared_branch
 from po_formulas.software_dev import (
     _load_rig_env,
     _record_flow_outcome,
@@ -266,6 +267,8 @@ def software_dev_agentic(
     parent_bead: str | None = None,
     dry_run: bool = False,
     claim: bool = True,
+    epic_branch: str | None = None,
+    parent_epic_id: str | None = None,
 ) -> dict[str, Any]:
     """One prompt-driven actor looped against one goal-verifying critic.
 
@@ -279,6 +282,16 @@ def software_dev_agentic(
     Parameters mirror the ``software_dev_full`` subset that fanout
     dispatchers care about (``issue_id`` / ``rig`` / ``rig_path`` plus
     optional ``parent_bead`` / ``dry_run``).
+
+    **Shared-branch epic mode** (``epic_branch`` set, threaded by
+    ``agentic_epic(shared_branch=True)``): the worker is told — via the
+    ``branch_directive`` prompt block — to branch off the *current epic tip*
+    instead of ``main`` and to push but **not** open its own PR. On critic-pass
+    the flow integrates the child's branch into ``epic_branch`` (serialized,
+    locked) instead of dispatching the PR sheriff, and skips per-child preview
+    stamping. ``parent_epic_id`` identifies the epic for the integration
+    worktree + lock. When ``epic_branch`` is ``None`` behavior is unchanged
+    (per-child worktree off ``main`` + its own PR).
     """
     logger = get_run_logger()
     rig_path_p = Path(rig_path).expanduser().resolve()
@@ -294,6 +307,14 @@ def software_dev_agentic(
 
     preview_mode = _resolve_preview_mode()
     preview_note = _preview_note(preview_mode, run_dir, _demo_video_requested())
+
+    # Shared-branch epic mode: the worker branches off the epic tip and pushes
+    # without opening a PR; the flow integrates on pass. Empty directive in the
+    # default per-child-PR mode keeps the worker prompt byte-for-byte unchanged.
+    shared_mode = bool(epic_branch)
+    worker_branch_directive = (
+        shared_branch.branch_directive(epic_branch, issue_id) if shared_mode else ""
+    )
 
     try:
         critic_verdict = ""
@@ -313,6 +334,7 @@ def software_dev_agentic(
                     "pack_path": str(pack_path_p),
                     "revision_note": _revision_note(fix_list),
                     "preview_note": preview_note,
+                    "branch_directive": worker_branch_directive,
                 },
                 verdict_keywords=("complete", "failed"),
                 dry_run=dry_run,
@@ -356,20 +378,42 @@ def software_dev_agentic(
                 f"critic={critic_verdict or '(no verdict)'}"
             )
 
-        # End-of-run preview: read the worker's preview_url.txt and stamp
-        # po.preview_url so dashboard cards can link it. Best-effort — a
-        # backend-only change leaves no file and stamps nothing.
+        # Shared-branch mode: integrate the child's branch into the epic branch
+        # instead of leaving its own PR / stamping a preview. The merge is
+        # serialized (locked) so parallel lanes don't race the shared ref; the
+        # advanced epic tip is what the next dependent child stacks on.
+        integration: dict[str, object] | None = None
         preview_url = ""
-        if not dry_run:
-            preview_url = _stamp_preview_url(issue_id, rig_path_p, run_dir)
-            if preview_url:
-                logger.info("agentic: stamped po.preview_url=%s", preview_url)
-            elif preview_mode != "off":
-                logger.info(
-                    "agentic: PO_PREVIEW=%s but worker wrote no %s",
-                    preview_mode,
-                    _PREVIEW_URL_FILE,
+        if shared_mode:
+            if not dry_run:
+                epic_for_wt = parent_epic_id or parent_bead or issue_id
+                integration = shared_branch.integrate_child(
+                    rig_path_p, epic_for_wt, issue_id
                 )
+                if integration.get("conflict"):
+                    # A dirty integration is rare (coupled children are
+                    # blocks-ordered) — surface it but don't fail the child run;
+                    # the epic finalize / a fix-merge child resolves it.
+                    logger.warning(
+                        "agentic: shared-branch integrate of %s conflicted: %s",
+                        issue_id, integration.get("reason"),
+                    )
+                else:
+                    logger.info("agentic: integrated %s into %s", issue_id, epic_branch)
+        else:
+            # End-of-run preview: read the worker's preview_url.txt and stamp
+            # po.preview_url so dashboard cards can link it. Best-effort — a
+            # backend-only change leaves no file and stamps nothing.
+            if not dry_run:
+                preview_url = _stamp_preview_url(issue_id, rig_path_p, run_dir)
+                if preview_url:
+                    logger.info("agentic: stamped po.preview_url=%s", preview_url)
+                elif preview_mode != "off":
+                    logger.info(
+                        "agentic: PO_PREVIEW=%s but worker wrote no %s",
+                        preview_mode,
+                        _PREVIEW_URL_FILE,
+                    )
 
         if claim and not dry_run:
             close_issue(
@@ -378,16 +422,18 @@ def software_dev_agentic(
                 rig_path=rig_path_p,
             )
 
-        # The worker's PR is open and the critic passed — announce the PR to
-        # po-director, which fires the PR Sheriff iff the workspace is in an
-        # auto merge mode. Best-effort; never fails a completed run.
-        if not dry_run:
+        # Per-child-PR mode only: the worker's PR is open and the critic passed,
+        # so announce the PR to po-director, which fires the PR Sheriff iff the
+        # workspace is in an auto merge mode. Shared-branch children open no PR
+        # of their own (the epic owns the single PR), so this is skipped for them.
+        if not dry_run and not shared_mode:
             _dispatch_pr_sheriff(rig_path_p, issue_id, logger)
 
         return {
             "status": "completed",
             "critic_verdict": critic_verdict,
             "preview_url": preview_url,
+            "integration": integration,
         }
     except Exception as exc:
         _record_flow_outcome(run_dir, exc, issue_id, str(rig_path_p))

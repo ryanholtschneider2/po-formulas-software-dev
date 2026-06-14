@@ -160,3 +160,157 @@ def test_agentic_epic_dry_run_skips_creation(tmp_path, monkeypatch):
 
     result = ae.agentic_epic.fn(epic_id="e1", rig="r", rig_path=str(tmp_path), dry_run=True)
     assert result["status"] == "dry-run"
+
+
+# ── _plan_lanes (parallel-where-independent / serial-where-coupled) ───────────
+
+
+def test_plan_lanes_groups_parallel_then_serial():
+    plan = [
+        {"key": "1", "depends_on": []},
+        {"key": "2", "depends_on": []},
+        {"key": "3", "depends_on": ["1", "2"]},
+        {"key": "4", "depends_on": ["3"]},
+    ]
+    # 1 & 2 are independent → one parallel lane; 3 stacks on both; 4 stacks on 3.
+    assert ae._plan_lanes(plan) == [["1", "2"], ["3"], ["4"]]
+
+
+# ── shared-branch mode ───────────────────────────────────────────────────────
+
+
+def _patch_common(monkeypatch, run_dir, plan):
+    """Shared monkeypatching for the shared-branch flow tests."""
+
+    def fake_agent_step(*, agent_dir, step, **kwargs):
+        if step == "epic-plan":
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / ae._PLAN_FILE).write_text(json.dumps(plan))
+
+        class _R:
+            verdict = "pass"
+            closed_by = "agent"
+
+        return _R()
+
+    monkeypatch.setattr(ae, "get_run_logger", lambda: _NULL_LOGGER)
+    monkeypatch.setattr(ae, "agent_step", fake_agent_step)
+    monkeypatch.setattr(ae, "claim_issue", lambda *a, **k: None)
+    monkeypatch.setattr(ae, "_bd_show_description", lambda *a, **k: "goal text")
+    monkeypatch.setattr(
+        ae, "create_child_bead", lambda *, parent_id, child_id, **k: child_id
+    )
+    monkeypatch.setattr(ae, "_bd_set_metadata", lambda *a, **k: None)
+    monkeypatch.setattr(ae, "_bd_dep_add", lambda *a, **k: None)
+    monkeypatch.setattr(ae, "close_issue", lambda *a, **k: None)
+
+
+def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypatch):
+    epic_id = "rig-epic1"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {
+        "children": [
+            {"key": "1", "title": "a", "description": "d1", "depends_on": []},
+            {"key": "2", "title": "b", "description": "d2", "depends_on": ["1"]},
+        ]
+    }
+    _patch_common(monkeypatch, run_dir, plan)
+
+    calls: dict = {}
+
+    def fake_create(rp, eid, **k):
+        calls["create"] = (str(eid), k)
+        return {"branch": f"epic/{eid}", "created": True, "pushed": True, "remote": True}
+
+    def fake_pr(rp, **k):
+        calls["pr"] = k
+        return {"opened": True, "url": "https://x/pull/9", "reason": ""}
+
+    def fake_ready(rp, **k):
+        calls["ready"] = k
+        return {"ready": True, "reason": ""}
+
+    monkeypatch.setattr(ae.sb, "create_integration_branch", fake_create)
+    monkeypatch.setattr(ae.sb, "open_draft_pr", fake_pr)
+    monkeypatch.setattr(ae.sb, "mark_pr_ready", fake_ready)
+    monkeypatch.setattr(
+        ae.sb, "cleanup_integration_worktree",
+        lambda rp, eid: calls.__setitem__("cleanup", str(eid)),
+    )
+    dispatched: dict = {}
+    monkeypatch.setattr(ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"})
+
+    result = ae.agentic_epic.fn(
+        epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True
+    )
+
+    # One integration branch off main + one draft PR.
+    assert calls["create"][0] == epic_id
+    assert calls["create"][1]["base_branch"] == "main"
+    assert calls["pr"]["branch"] == f"epic/{epic_id}"
+    assert calls["pr"]["base_branch"] == "main"
+    # Children fanned out with the epic_branch / parent_epic_id threaded through.
+    assert dispatched["extra_formula_kwargs"] == {
+        "epic_branch": f"epic/{epic_id}",
+        "parent_epic_id": epic_id,
+    }
+    assert dispatched["formula"] == "software-dev-agentic"
+    # Finalize flips the single PR to ready + cleans the integration worktree.
+    assert calls["ready"]["branch"] == f"epic/{epic_id}"
+    assert calls["cleanup"] == epic_id
+    assert result["shared_branch"] is True
+    assert result["epic_branch"] == f"epic/{epic_id}"
+    assert result["pr"]["url"] == "https://x/pull/9"
+
+
+def test_agentic_epic_default_off_does_not_touch_shared_branch(tmp_path, monkeypatch):
+    """Default OFF must not create a branch / PR and must dispatch with no
+    extra_formula_kwargs (the existing per-child-PR path, unchanged)."""
+    epic_id = "rig-epic2"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {"children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]}
+    _patch_common(monkeypatch, run_dir, plan)
+
+    def boom(*a, **k):
+        pytest.fail("default-off must not call shared_branch transport")
+
+    monkeypatch.setattr(ae.sb, "create_integration_branch", boom)
+    monkeypatch.setattr(ae.sb, "open_draft_pr", boom)
+    monkeypatch.setattr(ae.sb, "mark_pr_ready", boom)
+
+    dispatched: dict = {}
+    monkeypatch.setattr(ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"})
+
+    result = ae.agentic_epic.fn(epic_id=epic_id, rig="rig", rig_path=str(tmp_path))
+
+    assert dispatched["extra_formula_kwargs"] is None
+    assert result["shared_branch"] is False
+    assert result["epic_branch"] is None
+
+
+def test_agentic_epic_shared_branch_dry_run(tmp_path, monkeypatch):
+    """Dry-run shows the epic branch + draft-PR intent + parallel/serial lanes
+    without creating beads, branches, or dispatching (AC1)."""
+    epic_id = "rig-epic3"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {
+        "children": [
+            {"key": "1", "title": "a", "description": "d", "depends_on": []},
+            {"key": "2", "title": "b", "description": "d", "depends_on": []},
+            {"key": "3", "title": "c", "description": "d", "depends_on": ["1", "2"]},
+        ]
+    }
+    _patch_common(monkeypatch, run_dir, plan)
+    monkeypatch.setattr(
+        ae.sb, "create_integration_branch",
+        lambda *a, **k: pytest.fail("dry-run must not create a branch"),
+    )
+    monkeypatch.setattr(ae, "graph_run", lambda **k: pytest.fail("dry-run must not dispatch"))
+
+    result = ae.agentic_epic.fn(
+        epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True, dry_run=True
+    )
+    assert result["status"] == "dry-run"
+    assert result["shared_branch"] is True
+    assert result["epic_branch"] == f"epic/{epic_id}"
+    assert result["lanes"] == [["1", "2"], ["3"]]

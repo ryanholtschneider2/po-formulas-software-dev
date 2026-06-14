@@ -135,6 +135,62 @@ not in the agentic dispatch.
 > gate layer is a conscious philosophy reversal, not a bug fix — it needs
 > an explicit human decision, not a silent restore.
 
+## `agentic-epic --shared-branch` — one PR per epic (stacked + parallel)
+
+By default `agentic-epic` fans children out as N independent
+`software-dev-agentic` runs, each opening its own worktree off `main` and its
+own PR. For a **coupled** epic — children that edit the same files (a UI
+redesign touching `Inbox.tsx` / `Fleet.tsx` / nav) — N PRs is the worst of both
+worlds: parallel children collide on merge, serial children are slow and *still*
+collide because beads close on critic-pass while PRs merge asynchronously.
+
+`--shared-branch` lands the whole epic as **one integration branch
+`epic/<epic-id>` + one draft PR** instead:
+
+```bash
+po run agentic-epic --epic-id <id> --rig <name> --rig-path <path> --shared-branch
+```
+
+What changes (default OFF — the per-child-PR path is untouched):
+
+1. The flow cuts one integration branch `epic/<epic-id>` off `main` and opens a
+   single **draft** PR (progress is visible as commits land). No remote / no
+   `gh` → it degrades gracefully and leaves the branch for a human to PR.
+2. Children fan out through `graph_run` exactly as before, but each worker is
+   told (via its prompt) to branch off the **current epic tip** — not `main` —
+   and to **push without opening a PR**. Independent children run in parallel
+   off the same starting tip; `blocks`-chained children stack, because a
+   dependent starts only after its prerequisite is integrated and so branches
+   off the advanced tip. Parallel across the DAG's width, stacked along its depth.
+3. **Integrate-on-pass:** when a child's critic passes, the flow merges that
+   child's branch into `epic/<id>` (serialized by a file lock so parallel lanes
+   never race the shared ref). The merge is clean because coupled children are
+   `blocks`-ordered and never run concurrently; a conflict aborts cleanly and is
+   reported (rare, not routine).
+4. **Finalize:** the draft PR is flipped to ready for human / PR-sheriff review.
+
+**Wire `blocks` edges only between children that actually couple.** This is the
+operator's one job and it directly controls the parallel/serial shape (ZFC:
+branch/worktree/merge mechanics are code; *which children couple* is your
+`blocks` wiring). Two children that edit the same file → add a `blocks` edge so
+they stack; leave independent children unwired so they fan out wide. Over-wiring
+serializes work that could run in parallel; under-wiring lets two children edit
+the same file off the same tip and risk an integration conflict.
+
+Dry-run shows the planned shape without spawning agents or touching git:
+
+```bash
+po run agentic-epic --epic-id <id> --rig <name> --rig-path <path> \
+  --shared-branch --dry-run
+# logs: epic/<id> branch + 1 draft PR (intended), and the parallel/serial lanes
+```
+
+Mechanics live in `po_formulas/shared_branch.py` (pure git/gh transport, no
+Prefect — unit-tested in `tests/test_shared_branch.py`). Per-child base-off-tip
++ integrate-on-pass is threaded through `software_dev_agentic`'s `epic_branch` /
+`parent_epic_id` kwargs (passed by `agentic_epic` via `graph_run`'s
+`extra_formula_kwargs`).
+
 ## `minimal-task` — lightweight pipeline for fanout demos
 
 Pipeline shape:
