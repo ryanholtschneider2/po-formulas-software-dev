@@ -299,6 +299,61 @@ def test_agentic_epic_shared_branch_no_pr_when_nothing_integrated(tmp_path, monk
     assert "no children integrated" in result["pr"]["reason"]
 
 
+def test_agentic_epic_acceptance_fail_opens_draft(tmp_path, monkeypatch):
+    """Epic acceptance-critic FAIL → the single PR is opened as a DRAFT (so the
+    sheriff can't auto-merge a gapped epic), with the verdict surfaced."""
+    epic_id = "rig-epic-accept-fail"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {"children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]}
+    _patch_common(monkeypatch, run_dir, plan)
+
+    # Planning steps pass; the acceptance critic FAILS.
+    def fake_agent_step(*, agent_dir, step, **kwargs):
+        if step == "epic-plan":
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / ae._PLAN_FILE).write_text(json.dumps(plan))
+        v = "fail" if step == "epic-acceptance-critic" else "pass"
+        return type("R", (), {"verdict": v, "closed_by": "agent"})()
+
+    monkeypatch.setattr(ae, "agent_step", fake_agent_step)
+    monkeypatch.setattr(
+        ae.sb, "create_integration_branch",
+        lambda rp, eid, **k: {"branch": f"epic/{eid}", "created": True, "pushed": True, "remote": True},
+    )
+    monkeypatch.setattr(ae.sb, "commits_ahead", lambda rp, base, branch: 3)
+    pr_calls: dict = {}
+    monkeypatch.setattr(
+        ae.sb, "open_draft_pr",
+        lambda rp, **k: pr_calls.update(k) or {"opened": True, "url": "https://x/pull/5", "reason": ""},
+    )
+    monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
+    monkeypatch.setattr(ae, "graph_run", lambda **k: {"status": "ok", "results": {}})
+
+    result = ae.agentic_epic.fn(
+        epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True
+    )
+    assert pr_calls["draft"] is True            # FAIL → draft
+    assert "FAIL" in pr_calls["body"]           # verdict surfaced in the PR body
+    assert result["pr"]["acceptance_verdict"] == "fail"
+
+
+def test_integration_summary_marks_landed_and_dropped():
+    dispatch = {
+        "results": {
+            "c1": {"integration": {"merged": True}},
+            "c2": {"integration": {"merged": False, "conflict": True, "reason": "merge conflict: IdeaCard.tsx"}},
+            "c3": RuntimeError("did not converge after 2 iter(s) — critic=fail"),
+            "c4": {"integration": {"merged": False, "conflict": False, "reason": "skipped"}},
+        }
+    }
+    s = ae._integration_summary(dispatch)
+    assert "`c1`: LANDED" in s
+    assert "`c2`: DROPPED — merge conflict" in s
+    assert "`c3`: FAILED" in s and "critic=fail" in s
+    assert "`c4`: DROPPED — not integrated" in s
+    assert "no per-child results" in ae._integration_summary({})
+
+
 def test_agentic_epic_default_is_shared_branch(tmp_path, monkeypatch):
     """The default (no shared_branch kwarg) now lands the epic on ONE integration
     branch + draft PR — shared-branch is the dispatch path, not opt-in."""
