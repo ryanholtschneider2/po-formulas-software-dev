@@ -79,11 +79,8 @@ def test_create_integration_branch_off_remote_base(monkeypatch, tmp_path):
         "pushed": True,
         "remote": True,
     }
-    # Seed an empty commit off the fetched remote tip (so the branch diverges
-    # from base and a draft PR is openable), point the branch at it, then push.
-    assert fake.ran("rev-parse", "--verify", "origin/main")
-    assert fake.ran("commit-tree", "epic/rig-e1")
-    assert fake.ran("branch", "epic/rig-e1")
+    # Cut off the fetched remote tip, then pushed (no PR yet — opened at finalize).
+    assert fake.ran("branch", "epic/rig-e1", "origin/main")
     assert fake.ran("push", "-u", "origin", "epic/rig-e1")
 
 
@@ -118,32 +115,9 @@ def test_create_integration_branch_local_only(monkeypatch, tmp_path):
         "pushed": False,
         "remote": False,
     }
-    # No remote → branch seeded off the local base, never pushed.
-    assert fake.ran("commit-tree", "epic/rig-e1")
-    assert fake.ran("branch", "epic/rig-e1")
+    # No remote → branch cut off the local base, never pushed.
+    assert fake.ran("branch", "epic/rig-e1", "main")
     assert not fake.ran("push")
-
-
-def test_create_integration_branch_seeds_divergent_commit(monkeypatch, tmp_path):
-    """The created branch must carry a seed commit so it is ahead of base —
-    gh won't open a PR for a branch with no commits between it and main."""
-    fake = FakeRun(
-        {
-            "remote": (0, "origin\n", ""),
-            "rev-parse --verify --quiet refs/heads/epic/": (1, "", ""),  # absent
-            "rev-parse --verify --quiet refs/remotes/origin/main": (0, "base\n", ""),
-            "^{tree}": (0, "treesha\n", ""),
-            "rev-parse --verify origin/main": (0, "basesha\n", ""),
-            "commit-tree": (0, "seedsha\n", ""),
-        }
-    )
-    monkeypatch.setattr(subprocess, "run", fake)
-
-    sb.create_integration_branch(tmp_path, "rig-e1", base_branch="main")
-
-    # Seed commit is parented on the base tip, and the branch points at the seed.
-    assert fake.ran("commit-tree", "treesha", "-p", "basesha")
-    assert fake.ran("branch", "epic/rig-e1", "seedsha")
 
 
 # ── open_draft_pr / mark_pr_ready ────────────────────────────────────────────
@@ -165,6 +139,36 @@ def test_open_draft_pr_opens(monkeypatch, tmp_path, gh_present):
     assert info["opened"] is True
     assert info["url"] == "https://github.com/x/y/pull/7"
     assert fake.ran("pr", "create", "--draft", "--base", "main", "--head", "epic/e1")
+
+
+def test_open_draft_pr_ready_omits_draft_flag(monkeypatch, tmp_path, gh_present):
+    """Finalize opens the epic PR ready-for-review (draft=False): no --draft."""
+    fake = FakeRun(
+        {
+            "remote": (0, "origin\n", ""),
+            "pr view": (1, "", "no pr"),
+            "pr create": (0, "https://github.com/x/y/pull/9\n", ""),
+        }
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    info = sb.open_draft_pr(
+        tmp_path, branch="epic/e1", base_branch="main", title="t", body="b", draft=False
+    )
+    assert info["opened"] is True
+    assert fake.ran("pr", "create", "--base", "main", "--head", "epic/e1")
+    assert not fake.ran("pr", "create", "--draft")
+
+
+def test_commits_ahead_counts_and_is_error_safe(monkeypatch, tmp_path):
+    fake = FakeRun({"rev-list --count main..epic/e1": (0, "3\n", "")})
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert sb.commits_ahead(tmp_path, "main", "epic/e1") == 3
+
+    # Non-numeric / git error → 0 (treat "can't tell" as "nothing to PR").
+    bad = FakeRun({"rev-list": (128, "", "fatal: bad revision")})
+    monkeypatch.setattr(subprocess, "run", bad)
+    assert sb.commits_ahead(tmp_path, "main", "epic/e1") == 0
 
 
 def test_open_draft_pr_idempotent_when_pr_exists(monkeypatch, tmp_path, gh_present):
@@ -280,4 +284,9 @@ def test_branch_directive_overrides_and_names_branch():
     assert "OVERRIDES" in text
     assert "epic/rig-e1" in text
     assert "agentic-rig-e1_2" in text
-    assert "DO NOT open a PR" in text
+    # Must forbid the child from opening its own PR / merging to main…
+    assert "gh pr create" in text and "NEVER" in text
+    assert "main" in text
+    # …and diff against the epic branch (not main) so the critic sees only this
+    # child's changes, not prior children's integrated work.
+    assert "epic/rig-e1...HEAD" in text

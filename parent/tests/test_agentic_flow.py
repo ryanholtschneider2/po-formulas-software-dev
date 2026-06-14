@@ -457,7 +457,7 @@ def test_shared_mode_passes_branch_directive_and_integrates(
 
     worker_calls = [c for c in calls if c.get("step") == "agentic"]
     directive = worker_calls[0]["ctx"]["branch_directive"]
-    assert "epic/e1" in directive and "DO NOT open a PR" in directive
+    assert "epic/e1" in directive and "gh pr create" in directive and "NEVER" in directive
     assert integrated == {"eid": "e1", "cid": "c1"}
     assert result["integration"]["merged"] is True
     assert closed == ["c1"]

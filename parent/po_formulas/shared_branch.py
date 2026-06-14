@@ -162,33 +162,12 @@ def create_integration_branch(
         ):
             start_point = f"origin/{base_branch}"
 
-    # Seed the branch with one empty commit so it diverges from base by a
-    # commit. gh refuses to open a PR for a branch with nothing ahead of base
-    # ("No commits between main and epic/<id>"), which strands the whole epic's
-    # integrated work behind a PR that was never opened. The seed is harmless:
-    # the final squash-merge of the epic PR collapses it away. `-c user.*` keeps
-    # commit-tree working in headless/agent contexts where git identity is unset.
-    start_sha = _git(["rev-parse", "--verify", start_point], cwd=repo).stdout.strip()
-    tree = _git(
-        ["rev-parse", "--verify", f"{start_point}^{{tree}}"], cwd=repo
-    ).stdout.strip()
-    seed = _git(
-        [
-            "-c",
-            "user.name=po-agentic-epic",
-            "-c",
-            "user.email=po@local",
-            "commit-tree",
-            tree,
-            "-p",
-            start_sha,
-            "-m",
-            f"chore: open {branch} integration branch",
-        ],
-        cwd=repo,
-    ).stdout.strip()
-    _git(["branch", branch, seed], cwd=repo)
-    logger.info("shared-branch: created %s off %s (seeded)", branch, start_point)
+    # Cut the branch at the base tip (no seed commit). The epic PR is opened at
+    # FINALIZE, only once children have integrated real commits — so the branch
+    # legitimately has a diff by then and no empty-commit seed is needed. Opening
+    # the PR upfront risked the PR-sheriff merging a still-incomplete epic.
+    _git(["branch", branch, start_point], cwd=repo)
+    logger.info("shared-branch: created %s off %s", branch, start_point)
 
     pushed = False
     if remote:
@@ -201,6 +180,25 @@ def create_integration_branch(
     return {"branch": branch, "created": True, "pushed": pushed, "remote": remote}
 
 
+def commits_ahead(
+    rig_path: Path | str, base_branch: str, branch: str
+) -> int:
+    """How many commits ``branch`` is ahead of ``base_branch`` (``base..branch``).
+
+    Used at finalize to decide whether to open the epic PR at all: zero means no
+    child integrated, so there is nothing to review and no PR is opened. Returns
+    0 on any git error (treat "can't tell" as "nothing to PR").
+    """
+    repo = Path(rig_path).expanduser().resolve()
+    out = _git(
+        ["rev-list", "--count", f"{base_branch}..{branch}"], cwd=repo, check=False
+    )
+    try:
+        return int(out.stdout.strip())
+    except (ValueError, AttributeError):
+        return 0
+
+
 def open_draft_pr(
     rig_path: Path | str,
     *,
@@ -208,8 +206,13 @@ def open_draft_pr(
     base_branch: str,
     title: str,
     body: str,
+    draft: bool = True,
 ) -> dict[str, object]:
-    """Open a single **draft** PR for ``branch`` → ``base_branch`` via ``gh``.
+    """Open a single PR for ``branch`` → ``base_branch`` via ``gh``.
+
+    ``draft=True`` (default) opens it as a draft; the epic flow opens it
+    ``draft=False`` (ready-for-review) at FINALIZE, once every child has
+    integrated — so the PR-sheriff never sees an incomplete epic.
 
     Graceful no-op (never raises) when there is no remote or ``gh`` is absent —
     the branch + commits are left for a human to PR. Idempotent: if a PR already
@@ -225,9 +228,7 @@ def open_draft_pr(
 
     existing = _existing_pr_url(repo, branch)
     if existing:
-        logger.info(
-            "shared-branch: draft PR already exists for %s: %s", branch, existing
-        )
+        logger.info("shared-branch: PR already exists for %s: %s", branch, existing)
         return {"opened": False, "url": existing, "reason": "PR already exists"}
 
     proc = subprocess.run(
@@ -235,7 +236,7 @@ def open_draft_pr(
             "gh",
             "pr",
             "create",
-            "--draft",
+            *(["--draft"] if draft else []),
             "--base",
             base_branch,
             "--head",
@@ -475,9 +476,16 @@ def branch_directive(epic_branch: str, child_id: str) -> str:
         f"`{epic_branch}`, so branching off its tip stacks your change on theirs.)\n"
         f"2. Implement + test on `{child_branch}`. Commit early and often.\n"
         f"3. **Push your branch** (`git push -u origin {child_branch}` if a remote "
-        "exists) but **DO NOT open a PR** — the orchestrator merges your branch "
-        f"into `{epic_branch}` on critic-pass and maintains the single epic PR.\n"
-        "4. Save your diff and close your iter bead exactly as instructed below."
+        "exists) but **NEVER run `gh pr create` and NEVER merge to `main`** — the "
+        f"orchestrator merges your branch into `{epic_branch}` on critic-pass and "
+        "opens the single epic PR at the very end. If a step below says 'open a "
+        "PR', that step does NOT apply to you; just push and report the branch.\n"
+        "4. When a step below says **Save the diff**, diff against the epic branch "
+        f"you forked from, NOT `main` (else you capture prior children's work too):\n\n"
+        "   ```bash\n"
+        f"   git diff {epic_branch}...HEAD > {{{{run_dir}}}}/build-iter-{{{{iter}}}}.diff\n"
+        "   ```\n"
+        "5. Close your iter bead exactly as instructed below."
     )
 
 
@@ -485,6 +493,7 @@ __all__ = [
     "epic_branch_name",
     "child_branch_name",
     "create_integration_branch",
+    "commits_ahead",
     "open_draft_pr",
     "mark_pr_ready",
     "integrate_child",
