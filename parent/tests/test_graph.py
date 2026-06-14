@@ -309,10 +309,75 @@ def test_dispatch_nodes_per_bead_formula_override() -> None:
     assert by_bead["override-bead"]["formula"] is other_callable
 
 
+def test_formula_name_from_labels() -> None:
+    assert (
+        graph_mod._formula_name_from_labels(["feature", "formula:software-dev-agentic"])
+        == "software-dev-agentic"
+    )
+    assert graph_mod._formula_name_from_labels(["po.formula=agent-step", "x"]) == "agent-step"
+    assert graph_mod._formula_name_from_labels(["feature", "bug"]) is None
+    assert graph_mod._formula_name_from_labels(None) is None
+    assert graph_mod._formula_name_from_labels(["formula:"]) is None  # empty -> None
+
+
+def test_resolve_per_bead_formula_from_label() -> None:
+    """beads-rust path: no metadata, formula carried on a `formula:<name>` label."""
+    sentinel = object()
+
+    def fake_show(bid: str, rig_path: Any = None) -> dict | None:
+        return {"id": bid, "metadata": {}, "labels": ["feature", "formula:agent-step"]}
+
+    def fake_resolve(name: str) -> Any:
+        if name == "agent-step":
+            return sentinel
+        raise ValueError(name)
+
+    def default_fn(**_: Any) -> Any:
+        return "default"
+
+    with (
+        patch("prefect_orchestration.beads_meta._bd_show", fake_show),
+        patch.object(graph_mod, "_resolve_formula", fake_resolve),
+    ):
+        got = graph_mod._resolve_per_bead_formula(
+            {"id": "b1", "status": "open", "block_deps": []},
+            default_callable=default_fn,
+            rig_path="/tmp/rig",
+            logger=_NullLogger(),
+        )
+    assert got is sentinel
+
+
+def test_resolve_per_bead_formula_metadata_beats_label() -> None:
+    """`po.formula` metadata takes precedence over a `formula:` label."""
+    meta_cb, label_cb = object(), object()
+
+    def fake_show(bid: str, rig_path: Any = None) -> dict | None:
+        return {
+            "id": bid,
+            "metadata": {"po.formula": "meta-formula"},
+            "labels": ["formula:label-formula"],
+        }
+
+    def fake_resolve(name: str) -> Any:
+        return {"meta-formula": meta_cb, "label-formula": label_cb}[name]
+
+    with (
+        patch("prefect_orchestration.beads_meta._bd_show", fake_show),
+        patch.object(graph_mod, "_resolve_formula", fake_resolve),
+    ):
+        got = graph_mod._resolve_per_bead_formula(
+            {"id": "b1"},
+            default_callable=object(),
+            rig_path="/tmp/rig",
+            logger=_NullLogger(),
+        )
+    assert got is meta_cb
+
+
 def test_dispatch_nodes_filters_iter_caps_by_signature() -> None:
     """`iter_cap`/etc. only flow into formulas that declare them — a minimal
     formula isn't surprised by mystery kwargs."""
-    seen: list[dict[str, Any]] = []
 
     def minimal(*, issue_id: str, rig: str, rig_path: str) -> None: ...
 
