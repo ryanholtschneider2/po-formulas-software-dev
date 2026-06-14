@@ -231,13 +231,16 @@ def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypa
         calls["pr"] = k
         return {"opened": True, "url": "https://x/pull/9", "reason": ""}
 
-    def fake_ready(rp, **k):
-        calls["ready"] = k
-        return {"ready": True, "reason": ""}
+    def boom_ready(rp, **k):
+        pytest.fail("mark_pr_ready must not be called — PR is opened ready at finalize")
 
     monkeypatch.setattr(ae.sb, "create_integration_branch", fake_create)
     monkeypatch.setattr(ae.sb, "open_draft_pr", fake_pr)
-    monkeypatch.setattr(ae.sb, "mark_pr_ready", fake_ready)
+    monkeypatch.setattr(ae.sb, "mark_pr_ready", boom_ready)
+    monkeypatch.setattr(
+        ae.sb, "commits_ahead",
+        lambda rp, base, branch: calls.__setitem__("ahead", (base, branch)) or 2,
+    )
     monkeypatch.setattr(
         ae.sb, "cleanup_integration_worktree",
         lambda rp, eid: calls.__setitem__("cleanup", str(eid)),
@@ -249,23 +252,51 @@ def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypa
         epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True
     )
 
-    # One integration branch off main + one draft PR.
+    # One integration branch off main; NO PR opened upfront (calls["pr"] only set
+    # at finalize). Children fanned out with epic_branch / parent_epic_id threaded.
     assert calls["create"][0] == epic_id
     assert calls["create"][1]["base_branch"] == "main"
-    assert calls["pr"]["branch"] == f"epic/{epic_id}"
-    assert calls["pr"]["base_branch"] == "main"
-    # Children fanned out with the epic_branch / parent_epic_id threaded through.
     assert dispatched["extra_formula_kwargs"] == {
         "epic_branch": f"epic/{epic_id}",
         "parent_epic_id": epic_id,
     }
     assert dispatched["formula"] == "software-dev-agentic"
-    # Finalize flips the single PR to ready + cleans the integration worktree.
-    assert calls["ready"]["branch"] == f"epic/{epic_id}"
+    # Finalize: checks commits ahead, then opens ONE ready PR (draft=False) and
+    # cleans the integration worktree.
+    assert calls["ahead"] == ("main", f"epic/{epic_id}")
+    assert calls["pr"]["branch"] == f"epic/{epic_id}"
+    assert calls["pr"]["draft"] is False
     assert calls["cleanup"] == epic_id
     assert result["shared_branch"] is True
     assert result["epic_branch"] == f"epic/{epic_id}"
     assert result["pr"]["url"] == "https://x/pull/9"
+
+
+def test_agentic_epic_shared_branch_no_pr_when_nothing_integrated(tmp_path, monkeypatch):
+    """If no child integrated a commit (commits_ahead==0), finalize opens NO PR."""
+    epic_id = "rig-epic-empty"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {"children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]}
+    _patch_common(monkeypatch, run_dir, plan)
+
+    monkeypatch.setattr(
+        ae.sb, "create_integration_branch",
+        lambda rp, eid, **k: {"branch": f"epic/{eid}", "created": True, "pushed": True, "remote": True},
+    )
+    monkeypatch.setattr(ae.sb, "commits_ahead", lambda rp, base, branch: 0)
+
+    def boom_pr(*a, **k):
+        pytest.fail("no commits ahead → must not open a PR")
+
+    monkeypatch.setattr(ae.sb, "open_draft_pr", boom_pr)
+    monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
+    monkeypatch.setattr(ae, "graph_run", lambda **k: {"status": "ok"})
+
+    result = ae.agentic_epic.fn(
+        epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True
+    )
+    assert result["pr"]["opened"] is False
+    assert "no children integrated" in result["pr"]["reason"]
 
 
 def test_agentic_epic_default_is_shared_branch(tmp_path, monkeypatch):

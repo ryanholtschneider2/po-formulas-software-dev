@@ -369,7 +369,7 @@ def _dry_run_summary(
             kind = "parallel" if len(lane) > 1 else "single"
             logger.info("agentic-epic: dry-run lane %d (%s): %s", i, kind, lane)
         logger.info(
-            "agentic-epic: dry-run — would create %s + 1 draft PR, %d lane(s)",
+            "agentic-epic: dry-run — would create %s + open 1 PR at finalize, %d lane(s)",
             out["epic_branch"], len(lanes),
         )
     return out
@@ -402,14 +402,16 @@ def agentic_epic(
     triple as ``(epic_id, rig, rig_path)`` — ``epic_id`` is the root.
 
     **Shared-branch mode** (``shared_branch=True``, the **default**): the whole
-    epic lands as one integration branch ``epic/<epic-id>`` + one draft PR. The
-    flow cuts the epic branch off ``base_branch``, opens the draft PR, then fans
-    the children out via ``graph_run`` threading ``epic_branch`` /
+    epic lands as one integration branch ``epic/<epic-id>`` + **one PR opened at
+    the end**. The flow cuts the epic branch off ``base_branch`` (no PR yet),
+    then fans the children out via ``graph_run`` threading ``epic_branch`` /
     ``parent_epic_id`` to each child run — so each child branches off the
     **current epic tip** (parallel where independent, stacked along ``blocks``
-    chains) and is merged into the epic branch on critic-pass. At the end the
-    draft PR is flipped to ready. Pass ``shared_branch=False`` to fall back to the
-    legacy per-child-PR path (N independent PRs, one per child).
+    chains), is merged into the epic branch on critic-pass, and **never opens its
+    own PR**. Only at finalize, once every child has integrated, is the single
+    PR opened ready-for-review — so the PR-sheriff can never merge an incomplete
+    epic. Pass ``shared_branch=False`` to fall back to the legacy per-child-PR
+    path (N independent PRs, one per child).
     """
     logger = get_run_logger()
     rig_path_p = Path(rig_path).expanduser().resolve()
@@ -501,7 +503,9 @@ def agentic_epic(
         child_ids = _create_children(epic_id, plan, rig_path_p, logger)
         logger.info("agentic-epic: created %d child bead(s): %s", len(child_ids), child_ids)
 
-        # ── Phase 4a: shared-branch setup (one integration branch + draft PR) ──
+        # ── Phase 4a: shared-branch setup (one integration branch, NO PR yet) ──
+        # The PR is opened at FINALIZE, only after every child has integrated, so
+        # the PR-sheriff never sees (and can never auto-merge) an incomplete epic.
         epic_branch = ""
         pr_info: dict[str, Any] | None = None
         extra_kwargs: dict[str, Any] | None = None
@@ -510,20 +514,10 @@ def agentic_epic(
             branch_info = sb.create_integration_branch(
                 rig_path_p, epic_id, base_branch=base_branch
             )
-            pr_info = dict(
-                sb.open_draft_pr(
-                    rig_path_p,
-                    branch=epic_branch,
-                    base_branch=base_branch,
-                    title=f"[epic] {epic_id}",
-                    body=(goal or f"agentic-epic {epic_id}")
-                    + f"\n\nShared-integration-branch epic. Children: {child_ids}",
-                )
-            )
             extra_kwargs = {"epic_branch": epic_branch, "parent_epic_id": epic_id}
             logger.info(
-                "agentic-epic: shared-branch %s (created=%s) draft PR=%s",
-                epic_branch, branch_info.get("created"), pr_info.get("url") or "(none)",
+                "agentic-epic: shared-branch %s (created=%s) — PR deferred to finalize",
+                epic_branch, branch_info.get("created"),
             )
 
         # ── Phase 4b: fan out (each child runs software-dev-agentic) ─────────
@@ -538,13 +532,34 @@ def agentic_epic(
             extra_formula_kwargs=extra_kwargs,
         )
 
-        # ── Phase 4c: shared-branch finalize (mark the single PR ready) ──────
+        # ── Phase 4c: shared-branch finalize — open ONE ready PR now ─────────
+        # Only when children actually integrated commits (else there is nothing
+        # to review). Opened ready-for-review (not draft) so the sheriff acts on
+        # a complete epic.
         if shared_branch:
-            ready = sb.mark_pr_ready(rig_path_p, branch=epic_branch)
+            ahead = sb.commits_ahead(rig_path_p, base_branch, epic_branch)
+            if ahead > 0:
+                pr_info = dict(
+                    sb.open_draft_pr(
+                        rig_path_p,
+                        branch=epic_branch,
+                        base_branch=base_branch,
+                        title=f"[epic] {epic_id}",
+                        body=(goal or f"agentic-epic {epic_id}")
+                        + f"\n\nShared-integration-branch epic. Children: {child_ids}",
+                        draft=False,
+                    )
+                )
+            else:
+                pr_info = {
+                    "opened": False,
+                    "url": "",
+                    "reason": "no children integrated commits — no PR",
+                }
             sb.cleanup_integration_worktree(rig_path_p, epic_id)
             logger.info(
-                "agentic-epic: shared-branch finalize — PR ready=%s (%s)",
-                ready.get("ready"), ready.get("reason") or "ok",
+                "agentic-epic: shared-branch finalize — PR=%s (%d commit(s) ahead)",
+                pr_info.get("url") or f"(none: {pr_info.get('reason')})", ahead,
             )
 
         # The epic closes only when every discovered child has closed — that is
