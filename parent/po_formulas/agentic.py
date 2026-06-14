@@ -178,11 +178,25 @@ def _dispatch_pr_sheriff(rig_path: Path, issue_id: str, logger: Any) -> None:
     and the first that dispatches wins (never both). Optional + non-fatal: a
     pack may not be installed, the rig may not be a managed workspace, or
     Prefect may be unreachable — none of which should fail a completed run.
+
+    This is the seam where an auto-merge pipeline most often appears to stall,
+    so every outcome is logged loudly — entry, each candidate module
+    (``unavailable`` / ``dispatched`` / ``declined`` / ``skipped``), and a
+    terminal line when nothing dispatched. The earlier silent return on the
+    "declined" path made "did the flow even try, and what happened?"
+    unanswerable from the run log: an operator chasing a stuck PR could not tell
+    a dispatch that fired (problem is downstream — worker/pool/merge) from one
+    that never fired (problem is here) — see po-formulas-software-dev-2wp.
     """
+    logger.info(
+        "agentic: PR sheriff dispatch — start (issue=%s rig=%s)", issue_id, rig_path
+    )
+    tried: list[str] = []
     for module_name, label in (
         ("po_soloco.sheriff_dispatch", "soloco-sheriff"),
         ("po_director.sheriff_dispatch", "pr-sheriff"),
     ):
+        tried.append(label)
         try:
             module = importlib.import_module(module_name)
         except Exception as exc:  # noqa: BLE001 — pack may not be installed
@@ -192,8 +206,21 @@ def _dispatch_pr_sheriff(rig_path: Path, issue_id: str, logger: Any) -> None:
             if module.on_pr_opened(str(rig_path), issue_id):
                 logger.info("agentic: dispatched %s for %s", label, issue_id)
                 return
+            logger.info(
+                "agentic: %s declined %s (not this rig's sheriff, or merge_mode "
+                "not auto, or its deployment is unapplied)",
+                label,
+                issue_id,
+            )
         except Exception as exc:  # noqa: BLE001 — sheriff dispatch is best-effort
             logger.info("agentic: %s dispatch skipped (%s)", label, exc)
+    logger.info(
+        "agentic: no PR sheriff dispatched for %s (tried: %s) — PR left open for "
+        "manual review (workspace is manual-merge, or no managed sheriff owns "
+        "this rig)",
+        issue_id,
+        ", ".join(tried),
+    )
 
 
 def _stamp_preview_url(issue_id: str, rig_path: Path, run_dir: Path) -> str:

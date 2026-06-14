@@ -90,6 +90,43 @@ for forensics.
 worktree and the PR — judged only on whether it accomplished the goal,
 the minimal prompt-driven way.
 
+### PR-sheriff hand-off (auto-merge)
+
+The flow never merges, but after the critic passes it **announces the open
+PR** to whichever managed sheriff owns the rig, which may then auto-merge.
+`_dispatch_pr_sheriff` tries SoloCo's `soloco-sheriff` first, then
+po-director's `pr-sheriff`; each `on_pr_opened` is best-effort and gates on
+the workspace `merge_mode` (`auto` / `ai-approve-all`) plus its own applied
+deployment, so the rig's owner fires and the first that dispatches wins
+(never both). A non-auto workspace, an uninstalled pack, or an unreachable
+Prefect just leaves the PR open for manual review.
+
+Every outcome is logged so a stuck PR is debuggable from the run log alone:
+
+```
+agentic: PR sheriff dispatch — start (issue=<id> rig=<path>)
+agentic: dispatched soloco-sheriff for <id>          # fired
+agentic: soloco-sheriff declined <id> (...)          # gated out / unapplied
+agentic: soloco-sheriff unavailable (...)            # pack not importable
+agentic: soloco-sheriff dispatch skipped (...)       # on_pr_opened raised
+agentic: no PR sheriff dispatched for <id> (tried: ...)   # nothing fired
+```
+
+A `dispatched` line means the problem (if a PR sits unmerged) is **downstream**
+of this flow — the sheriff deployment run, its worker, or the merge itself —
+not in the agentic dispatch.
+
+> **Operational footgun — wrong-env worker poaching the pool.** The
+> `soloco-sheriff` deployment runs on a shared work pool (`po`). If a Prefect
+> worker started from an env *without* the po formula packs (e.g. the bare
+> `prefect` tool venv rather than `prefect-orchestration`) also serves that
+> pool, it can poach a dispatched run and then fail to import the flow, wedging
+> the run in `Pending` forever while the PR sits unmerged. A `dispatched` log
+> line with no resulting merge and a `Pending` sheriff run is the signature.
+> Only run the pool's worker from the po-packs env (the managed
+> `prefect-worker-po.service`), and don't start ad-hoc workers on `po` from
+> other venvs.
+
 > **Note — the machine-gate variant was deliberately superseded.** An
 > earlier design (a "brief → worker → pure-Python mechanical gate layer
 > → HIGH/MEDIUM/LOW reviewer → close-iff-gates-green-and-review≥MEDIUM"
