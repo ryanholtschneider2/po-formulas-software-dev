@@ -155,7 +155,13 @@ def _preview_note(mode: str, run_dir: Path, demo: bool) -> str:
 
 
 def _bd_set_metadata(issue_id: str, key: str, value: str, rig_path: Path) -> None:
-    """Shell ``bd update <id> --set-metadata key=value`` (best-effort)."""
+    """Stamp ``key=value`` on a bead (best-effort).
+
+    Tries metadata (``--set-metadata``, dolt-bd). beads-rust has NO arbitrary
+    metadata — only labels — so for ``po.formula`` we ALSO add a
+    ``formula:<value>`` label, which ``_resolve_per_bead_formula`` reads. That
+    keeps the per-child formula stamp working on beads-rust.
+    """
     subprocess.run(
         ["bd", "update", issue_id, "--set-metadata", f"{key}={value}"],
         check=False,
@@ -163,6 +169,14 @@ def _bd_set_metadata(issue_id: str, key: str, value: str, rig_path: Path) -> Non
         text=True,
         cwd=str(rig_path),
     )
+    if key == "po.formula":
+        subprocess.run(
+            ["bd", "update", issue_id, "--add-label", f"formula:{value}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=str(rig_path),
+        )
 
 
 def _dispatch_pr_sheriff(rig_path: Path, issue_id: str, logger: Any) -> None:

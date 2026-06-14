@@ -298,6 +298,24 @@ def _build_pc_ancestor_index(
     return result
 
 
+def _formula_name_from_labels(labels: Any) -> str | None:
+    """A bead can carry its formula as a LABEL, e.g. ``formula:software-dev-agentic``
+    or ``po.formula=software-dev-agentic``. This is the only per-bead stamp that
+    works on beads-rust (which has no arbitrary metadata, only labels). Returns
+    the formula name, or None if no formula label is present.
+    """
+    if not isinstance(labels, (list, tuple)):
+        return None
+    for raw in labels:
+        s = str(raw).strip()
+        low = s.lower()
+        if low.startswith("formula:"):
+            return s.split(":", 1)[1].strip() or None
+        if low.startswith("po.formula="):
+            return s.split("=", 1)[1].strip() or None
+    return None
+
+
 def _resolve_per_bead_formula(
     node: dict[str, Any],
     *,
@@ -305,35 +323,44 @@ def _resolve_per_bead_formula(
     rig_path: str,
     logger: Any,
 ) -> Callable[..., Any] | None:
-    """Read `po.formula` metadata off `node` and pick the formula callable.
+    """Pick the per-bead formula callable from a `po.formula` metadata key OR a
+    `formula:<name>` label, falling back to the default.
 
-    Returns:
-      - the **default callable** when the bead has no `po.formula`
-        metadata (the common case).
-      - a freshly-EP-resolved callable when the bead names a different
-        formula (e.g. `po.formula=agent-step`).
-      - ``None`` when the bead is a human/sync-point (po.formula in
-        {none, no, human, skip} or unresolvable name) — caller should
-        skip dispatch and poll for closure.
+    Resolution order: ``po.formula`` metadata (dolt-bd) > a ``formula:<name>`` /
+    ``po.formula=<name>`` label (beads-rust, which has no metadata) > the default
+    callable. Returns:
+      - the **default callable** when the bead names no formula (common case).
+      - a freshly-EP-resolved callable when it names a different one.
+      - ``None`` when the bead is a human/sync-point (formula in
+        {none, no, human, skip} or unresolvable) — caller skips dispatch.
 
-    ``list_subgraph`` returns lean rows (no metadata) so we fetch the
-    bead's metadata lazily here via ``_bd_show`` — one extra shell per
-    node but only when the dispatcher cares (i.e. always, in graph mode).
+    ``list_subgraph`` returns lean rows, so we fetch the bead's metadata+labels
+    lazily via ``_bd_show`` (one shell per node, only when the dispatcher cares).
     """
     from prefect_orchestration.beads_meta import _bd_show as _shell_bd_show
 
     meta = node.get("metadata") or {}
     if not isinstance(meta, dict):
         meta = {}
-    if not meta:
+    labels = node.get("labels")
+    # Lazily fetch the full row if the lean node lacks metadata or labels.
+    if not meta or labels is None:
         try:
             row = _shell_bd_show(node["id"], rig_path=rig_path) or {}
         except Exception:  # noqa: BLE001
             row = {}
-        meta = row.get("metadata") or {} if isinstance(row, dict) else {}
-        if not isinstance(meta, dict):
-            meta = {}
+        if isinstance(row, dict):
+            if not meta:
+                meta = row.get("metadata") or {}
+                if not isinstance(meta, dict):
+                    meta = {}
+            if labels is None:
+                labels = row.get("labels")
+
     requested = meta.get("po.formula")
+    if requested is None or requested == "":
+        # beads-rust path: read the formula off a label instead of metadata.
+        requested = _formula_name_from_labels(labels)
     if requested is None or requested == "":
         return default_callable
     if str(requested).lower() in {"none", "no", "human", "skip"}:
@@ -342,7 +369,7 @@ def _resolve_per_bead_formula(
         return _resolve_formula(str(requested))
     except ValueError as exc:
         logger.warning(
-            "skip dispatch %s: po.formula=%r unresolvable (%s)",
+            "skip dispatch %s: formula=%r unresolvable (%s)",
             node["id"], requested, exc,
         )
         return None
