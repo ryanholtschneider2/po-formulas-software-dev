@@ -3,22 +3,34 @@
 Thin wrapper over `graph_run` (prefect-orchestration-uc0): delegates to
 edge-driven sub-graph traversal with `traverse=("parent-child", "blocks")`.
 
-Discovery is controlled by two new parameters
+Discovery is controlled by two parameters
 (prefect-orchestration-h5s):
 
-- ``discover``: which mode `list_epic_children` should use —
-  ``ids`` (dot-suffix probe; gas-city legacy), ``deps`` (`bd dep` graph
-  walk), or ``both`` (default; deps order first, then dot-suffix-only
-  ids appended).
+- ``discover``: which mode drives child discovery —
+  ``parent-child`` (default; walk ONLY parent-child edges to collect
+  the child set), ``ids`` (dot-suffix probe; gas-city legacy),
+  ``deps`` (`bd dep` graph walk over parent-child + blocks edges), or
+  ``both`` (deps order first, then dot-suffix-only ids appended).
 - ``child_ids``: comma-separated explicit override that bypasses
   discovery entirely. Each listed id must exist and be open; the DAG
   is built from `bd dep` edges *between* the listed ids (out-of-set
   blockers are dropped).
 
+Why ``parent-child`` is the default (po-formulas-software-dev-e9s):
+``deps`` / ``both`` walk `blocks` edges *up* to widen the discovered
+set, so dispatching an epic that another epic ``blocks``-depends on
+pulls that sibling epic (and its children) into the run — inverting
+the intended dependency. ``parent-child`` collects children via the
+parent-child relationship only; `blocks` edges are still honoured for
+topo-ordering *within* the discovered set (``list_subgraph`` always
+builds the blocks sub-DAG regardless of `traverse`), they just no
+longer WIDEN it. Operators who genuinely want the blocks-aware union
+opt in with ``discover=both``.
+
 The dot-suffix fallback in older builds was implicit ("if deps returned
 nothing, probe ids"). It is now explicit: pick `discover=both` to keep
-the old behaviour, `discover=deps` to opt out of the legacy probe, or
-`discover=ids` to opt out of the bd-dep walk.
+the old union behaviour, `discover=deps` to opt out of the legacy
+probe, or `discover=ids` to opt out of the bd-dep walk.
 
 Concurrency is a deploy-time concern:
 
@@ -37,6 +49,7 @@ from prefect_orchestration.beads_meta import (
     VALID_DISCOVER_MODES,
     collect_explicit_children,
     list_epic_children,
+    list_subgraph,
 )
 
 from po_formulas.graph import (
@@ -45,6 +58,39 @@ from po_formulas.graph import (
     _resolve_formula,
     _tag_root_run,
 )
+
+# Discovery mode that collects children via parent-child edges ONLY.
+# `blocks` edges are still used to topo-order the discovered set (see
+# `_discover_children`), they just don't WIDEN it into sibling epics.
+# This is the safe default — see module docstring + po-formulas-software-dev-e9s.
+PARENT_CHILD_DISCOVER = "parent-child"
+
+# `discover` values this flow accepts: the parent-child-only default plus
+# the core `list_epic_children` modes (ids / deps / both).
+VALID_EPIC_DISCOVER_MODES: tuple[str, ...] = (
+    PARENT_CHILD_DISCOVER,
+    *VALID_DISCOVER_MODES,
+)
+
+
+def _discover_children(
+    epic_id: str, discover: str, rig_path: str
+) -> list[dict[str, Any]]:
+    """Resolve an epic's child nodes for the given ``discover`` mode.
+
+    ``parent-child`` walks only parent-child edges via `list_subgraph`
+    (which still populates `block_deps` for topo-ordering within the
+    collected set); every other mode delegates to `list_epic_children`.
+    """
+    if discover == PARENT_CHILD_DISCOVER:
+        return list_subgraph(
+            epic_id,
+            traverse=(PARENT_CHILD_DISCOVER,),
+            include_closed=False,
+            include_root=False,
+            rig_path=rig_path,
+        )
+    return list_epic_children(epic_id, mode=discover, rig_path=rig_path)
 
 
 def _legacy_dot_suffix_children(epic_id: str) -> list[dict[str, Any]]:
@@ -78,7 +124,7 @@ def epic_run(
     ralph_iter_cap: int = 3,
     dry_run: bool = False,
     max_issues: int | None = None,
-    discover: str = "both",
+    discover: str = PARENT_CHILD_DISCOVER,
     child_ids: str | None = None,
 ) -> dict[str, Any]:
     """Fan out an epic's open children as concurrent software_dev_full runs.
@@ -88,9 +134,13 @@ def epic_run(
             "prefect-orchestration-3cu").
         max_issues: if set, only submit the first N topo-sorted children.
             Useful for testing "one issue at a time" before unleashing.
-        discover: which discovery mode to use — ``ids`` (dot-suffix
-            probe), ``deps`` (`bd dep` graph walk), or ``both`` (union;
-            default). Ignored when ``child_ids`` is supplied.
+        discover: which discovery mode to use — ``parent-child``
+            (parent-child edges only; default), ``ids`` (dot-suffix
+            probe), ``deps`` (`bd dep` graph walk over parent-child +
+            blocks), or ``both`` (union). Ignored when ``child_ids`` is
+            supplied. Default is ``parent-child`` so `blocks` edges
+            don't widen discovery into sibling epics; pass
+            ``discover=both`` for the blocks-aware union.
         child_ids: comma-separated explicit override. Skips discovery
             and submits exactly these ids in topo order built from
             their `bd dep --type=blocks` edges. Each id must exist and
@@ -99,9 +149,10 @@ def epic_run(
     logger = get_run_logger()
     _tag_root_run(epic_id, logger, extra_tag=f"epic_id:{epic_id}")
 
-    if discover not in VALID_DISCOVER_MODES:
+    if discover not in VALID_EPIC_DISCOVER_MODES:
         raise ValueError(
-            f"unknown discover mode {discover!r}; valid: {list(VALID_DISCOVER_MODES)}"
+            f"unknown discover mode {discover!r}; "
+            f"valid: {list(VALID_EPIC_DISCOVER_MODES)}"
         )
 
     if child_ids:
@@ -116,7 +167,7 @@ def epic_run(
             f"dispatching {len(nodes)} explicit node(s): {ids}"
         )
     else:
-        nodes = list_epic_children(epic_id, mode=discover, rig_path=rig_path)
+        nodes = _discover_children(epic_id, discover, rig_path)
         logger.info(
             f"discovered {len(nodes)} node(s) under {epic_id} via mode={discover}"
         )
