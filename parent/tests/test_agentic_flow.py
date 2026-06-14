@@ -287,3 +287,128 @@ def test_flow_outcome_written_on_worker_exception(
     assert outcome.is_file()
     data = json.loads(outcome.read_text())
     assert data["exception_class"] == "RuntimeError"
+
+
+# ─────────────────────── _dispatch_pr_sheriff (diagnosability) ───────
+#
+# Every outcome of the PR-sheriff dispatch must leave a log line so a stuck
+# PR is debuggable from the run log alone (po-formulas-software-dev-2wp): the
+# previously-silent "declined" path made a dispatch that *fired* (downstream
+# problem) indistinguishable from one that *never fired* (problem here).
+
+
+class _RecordingLogger:
+    """Captures `logger.info(msg, *args)` calls, rendered like the run logger."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def info(self, msg: str, *args: object) -> None:
+        self.lines.append(msg % args if args else msg)
+
+
+def _sheriff_module(*, returns: bool | None = None, raises: Exception | None = None):
+    """A stand-in `po_*.sheriff_dispatch` with a controllable `on_pr_opened`."""
+    import types
+
+    mod = types.ModuleType("fake.sheriff_dispatch")
+
+    def on_pr_opened(workspace_dir: str, feature_id: str) -> bool:
+        if raises is not None:
+            raise raises
+        assert returns is not None
+        return returns
+
+    mod.on_pr_opened = on_pr_opened  # type: ignore[attr-defined]
+    return mod
+
+
+def _patch_import(monkeypatch: pytest.MonkeyPatch, mapping: dict[str, object]) -> None:
+    """Patch `importlib.import_module`; names absent from `mapping` raise ImportError."""
+
+    def fake_import(name: str):
+        if name not in mapping:
+            raise ImportError(f"No module named {name!r}")
+        return mapping[name]
+
+    monkeypatch.setattr(ag.importlib, "import_module", fake_import)
+
+
+def test_dispatch_logs_start_and_dispatched_then_short_circuits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First module to dispatch wins; the second is never tried."""
+    log = _RecordingLogger()
+    _patch_import(
+        monkeypatch,
+        {
+            "po_soloco.sheriff_dispatch": _sheriff_module(returns=True),
+            "po_director.sheriff_dispatch": _sheriff_module(returns=True),
+        },
+    )
+    ag._dispatch_pr_sheriff(Path("/ws"), "feat-1", log)
+    joined = "\n".join(log.lines)
+    assert "PR sheriff dispatch — start (issue=feat-1" in joined
+    assert "dispatched soloco-sheriff for feat-1" in joined
+    # short-circuit: director never reached, no terminal "none" line
+    assert "pr-sheriff" not in joined
+    assert "no PR sheriff dispatched" not in joined
+
+
+def test_dispatch_logs_declined_then_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `False` from the first module is logged, then the second is tried."""
+    log = _RecordingLogger()
+    _patch_import(
+        monkeypatch,
+        {
+            "po_soloco.sheriff_dispatch": _sheriff_module(returns=False),
+            "po_director.sheriff_dispatch": _sheriff_module(returns=True),
+        },
+    )
+    ag._dispatch_pr_sheriff(Path("/ws"), "feat-2", log)
+    joined = "\n".join(log.lines)
+    assert "soloco-sheriff declined feat-2" in joined
+    assert "dispatched pr-sheriff for feat-2" in joined
+    assert "no PR sheriff dispatched" not in joined
+
+
+def test_dispatch_logs_terminal_line_when_none_fire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both decline → a terminal line names what was tried (never silent)."""
+    log = _RecordingLogger()
+    _patch_import(
+        monkeypatch,
+        {
+            "po_soloco.sheriff_dispatch": _sheriff_module(returns=False),
+            "po_director.sheriff_dispatch": _sheriff_module(returns=False),
+        },
+    )
+    ag._dispatch_pr_sheriff(Path("/ws"), "feat-3", log)
+    joined = "\n".join(log.lines)
+    assert "soloco-sheriff declined feat-3" in joined
+    assert "pr-sheriff declined feat-3" in joined
+    assert (
+        "no PR sheriff dispatched for feat-3 (tried: soloco-sheriff, pr-sheriff)"
+        in joined
+    )
+
+
+def test_dispatch_logs_unavailable_and_skipped_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Import failure → `unavailable`; on_pr_opened raising → `skipped`."""
+    log = _RecordingLogger()
+    boom = RuntimeError("prefect unreachable")
+    # po_soloco absent entirely (import fails); po_director present but raises.
+    _patch_import(
+        monkeypatch,
+        {"po_director.sheriff_dispatch": _sheriff_module(raises=boom)},
+    )
+    ag._dispatch_pr_sheriff(Path("/ws"), "feat-4", log)
+    joined = "\n".join(log.lines)
+    assert "soloco-sheriff unavailable" in joined
+    assert "pr-sheriff dispatch skipped (prefect unreachable)" in joined
+    assert "no PR sheriff dispatched for feat-4" in joined
