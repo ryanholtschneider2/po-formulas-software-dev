@@ -1,30 +1,29 @@
 """Prefect flow: ``agentic-epic``.
 
-A single entry point that **plans, creates, and dispatches** a whole epic of
-``software-dev-agentic`` runs from one high-level goal.
+A single entry point that **scopes, plans, and dispatches** a whole epic of
+``software-dev-agentic`` runs from one high-level goal, landing it as **one
+shared integration branch + one draft PR** (the po-formulas-software-dev-18m
+executor).
 
 The goal lives in the epic bead's own description (``po run agentic-epic
---epic-id <id>``). One planner agent decomposes that goal into child issues; a
-plan-critic reviews/iterates the decomposition (actor-critic on the *plan*);
-then the flow **creates the child beads** (wired with ``bd dep`` order edges and
-each stamped ``po.formula=software-dev-agentic``) and **fans them out** via the
-existing ``graph_run`` engine — so every child runs through the normal
-``software-dev-agentic`` worker→critic loop and ends at its own PR.
+--epic-id <id>``). Four phases run in order:
 
-Pipeline::
+1. **PRD** — one agent turns the goal into a short PRD (problem statement,
+   acceptance criteria, the concrete surfaces/files the work touches), written to
+   ``<run_dir>/prd.md``.
+2. **Decomposition** — a planner decomposes the goal into child issues, each
+   declaring the files it ``touches`` (the *coupling map*) plus any real
+   ``depends_on`` output edge.
+3. **Plan-critic loop** — a critic audits the *decomposition* (coverage, sizing,
+   dependencies, and — critically — whether coupling is captured so the parallel
+   lanes are conflict-safe). Actor-critic until pass or ``plan_iter_cap``.
+4. **Dispatch** — the flow creates the child beads, wires ``blocks`` edges
+   **only between coupled children** (shared files → serialized; disjoint files →
+   left parallel), and fans them out via ``graph_run`` with ``shared_branch=True``:
+   one ``epic/<id>`` integration branch, one draft PR, parallel where independent,
+   stacked where coupled, integrate-on-pass, mark-ready at finalize.
 
-    claim epic; read goal from `bd show <epic>`
-      → plan loop in 1..plan_iter_cap:
-            agent_step(agentic-epic-planner)      → writes <run_dir>/plan.json
-            agent_step(agentic-epic-plan-critic)  → pass | fail (+ fix list)
-            if critic == pass: break ; else feed fix list back to the planner
-      → create one child bead per planned item (parent-child + blocks edges,
-        po.formula=software-dev-agentic stamped)
-      → graph_run(root_id=<epic>, formula=software-dev-agentic) — fan out
-      → return summary (children created + dispatch result)
-
-The flow never merges: each child leaves its own PR for human review, exactly
-like a plain ``software-dev-agentic`` run.
+The flow never merges to ``main``: the single epic PR is the deliverable.
 
 ``plan.json`` contract (the planner writes this; the flow reads it)::
 
@@ -34,11 +33,21 @@ like a plain ``software-dev-agentic`` run.
           "key": "1",                       // child id becomes <epic>.1
           "title": "short imperative title",
           "description": "full bd body: what + why + acceptance criteria",
-          "depends_on": ["2"]               // keys that must finish first (blocks)
+          "touches": ["parent/po_formulas/foo.py"],  // files this child edits
+          "depends_on": ["2"],              // keys that must finish first (blocks)
+          "formula": "software-dev-agentic" // optional per-child override
         },
         ...
       ]
     }
+
+**Coupling → blocks edges.** Two children that share a file are *coupled*: they
+must not run in parallel off the same epic tip or they collide on integration.
+The flow derives the coupling map from each child's ``touches`` and auto-wires a
+``blocks`` edge for any coupled pair the planner left unordered — so coupled
+children always stack. Children with disjoint ``touches`` and no declared
+``depends_on`` get **no** edge and fan out in parallel. This is the
+"wire blocks only between coupled children" rule, enforced as transport.
 """
 
 from __future__ import annotations
@@ -64,6 +73,7 @@ from po_formulas.software_dev import (
 
 _AGENTS_DIR = Path(__file__).parent / "agents"
 _PLAN_FILE = "plan.json"
+_PRD_FILE = "prd.md"
 _CHILD_FORMULA = "software-dev-agentic"
 
 
@@ -137,7 +147,21 @@ def _parse_plan(run_dir: Path, max_children: int) -> list[dict[str, Any]]:
         if not title or not description:
             raise ValueError(f"child {key!r} is missing a title or description")
         depends_on = [str(d).strip() for d in (c.get("depends_on") or []) if str(d).strip()]
-        out.append({"key": key, "title": title, "description": description, "depends_on": depends_on})
+        raw_touches = c.get("touches") or []
+        if not isinstance(raw_touches, list):
+            raise ValueError(f"child {key!r} has a non-list 'touches'")
+        touches = [_norm_path(str(t)) for t in raw_touches if str(t).strip()]
+        formula = str(c.get("formula") or _CHILD_FORMULA).strip() or _CHILD_FORMULA
+        out.append(
+            {
+                "key": key,
+                "title": title,
+                "description": description,
+                "depends_on": depends_on,
+                "touches": touches,
+                "formula": formula,
+            }
+        )
 
     # Validate dep references point at real sibling keys.
     keys = {c["key"] for c in out}
@@ -146,6 +170,78 @@ def _parse_plan(run_dir: Path, max_children: int) -> list[dict[str, Any]]:
             if d not in keys:
                 raise ValueError(f"child {c['key']!r} depends_on unknown key {d!r}")
     return out
+
+
+def _norm_path(p: str) -> str:
+    """Normalize a ``touches`` path for coupling comparison: strip whitespace and
+    a leading ``./``, collapse backslashes. Cheap + deterministic so two children
+    naming the same file the same way compare equal."""
+    s = p.strip().replace("\\", "/")
+    while s.startswith("./"):
+        s = s[2:]
+    return s.rstrip("/")
+
+
+def _coupling_map(plan: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Return the *coupled* child-key pairs — children that ``touch`` ≥1 common
+    file and therefore must not run in parallel off the same epic tip.
+
+    Pairs are ordered ``(lo, hi)`` by key for deterministic output and de-duped.
+    A child with no ``touches`` couples with nothing (the planner declared no
+    shared surface). This is the read side of ZFC: deterministic transport over
+    the planner's judgment-authored ``touches``.
+    """
+    keyed = [(c["key"], set(c.get("touches") or [])) for c in plan]
+    coupled: set[tuple[str, str]] = set()
+    for i in range(len(keyed)):
+        for j in range(i + 1, len(keyed)):
+            (ka, ta), (kb, tb) = keyed[i], keyed[j]
+            if ta and tb and (ta & tb):
+                coupled.add(tuple(sorted((ka, kb))))  # type: ignore[arg-type]
+    return sorted(coupled)
+
+
+def _reachable(start: str, deps: dict[str, set[str]]) -> set[str]:
+    """All keys reachable from ``start`` following ``depends_on`` edges (its
+    transitive prerequisites). Used to test whether a coupled pair is already
+    ordered before auto-adding a serialization edge."""
+    seen: set[str] = set()
+    stack = list(deps.get(start, set()))
+    while stack:
+        k = stack.pop()
+        if k in seen:
+            continue
+        seen.add(k)
+        stack.extend(deps.get(k, set()))
+    return seen
+
+
+def _blocks_edges(plan: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Resolve the full set of ``blocks`` edges to wire as ``(child_key, prereq_key)``.
+
+    Two sources, unioned:
+
+    * the planner's declared ``depends_on`` (real output dependencies), and
+    * **coupling-derived** edges: for every coupled pair (sharing a file) that is
+      not already ordered in either direction, add ``(hi, lo)`` so the
+      higher-keyed child stacks after the lower — guaranteeing coupled children
+      never run concurrently on the shared branch.
+
+    Children that neither share a file nor declare a dependency get **no** edge —
+    that is the "blocks only between coupled children" rule. Returns a sorted,
+    de-duped edge list (child depends on prereq).
+    """
+    deps = {c["key"]: set(c["depends_on"]) for c in plan}
+    edges: set[tuple[str, str]] = set()
+    for child, prereqs in deps.items():
+        for prereq in prereqs:
+            edges.add((child, prereq))
+    # Auto-serialize coupled-but-unordered pairs.
+    for lo, hi in _coupling_map(plan):
+        if lo in _reachable(hi, deps) or hi in _reachable(lo, deps):
+            continue  # already ordered (directly or transitively) — leave as-is
+        edges.add((hi, lo))
+    return sorted(edges)
 
 
 def _bd_dep_add(child_id: str, prereq_id: str, rig_path: Path) -> None:
@@ -167,7 +263,15 @@ def _bd_dep_add(child_id: str, prereq_id: str, rig_path: Path) -> None:
 def _create_children(
     epic_id: str, plan: list[dict[str, Any]], rig_path: Path, logger: Any
 ) -> list[str]:
-    """Create + stamp + wire one bead per planned child. Returns child ids."""
+    """Create + stamp + wire one bead per planned child. Returns child ids.
+
+    Each child is stamped with its own resolved formula (default
+    ``software-dev-agentic``; the planner may set ``minimal-task`` on a trivial
+    child — formula-per-bead-size). ``blocks`` edges come from
+    :func:`_blocks_edges` — the planner's ``depends_on`` plus coupling-derived
+    serialization for any coupled pair left unordered — so coupled children
+    stack and independent children stay parallel.
+    """
     child_ids: dict[str, str] = {}  # plan-key → bead id
     for c in plan:
         child_id = f"{epic_id}.{c['key']}"
@@ -180,29 +284,36 @@ def _create_children(
             rig_path=rig_path,
             priority=2,
         )
-        # Stamp the per-child formula so graph_run routes each through the
-        # agentic worker→critic loop (not the dispatcher's default).
-        _bd_set_metadata(child_id, "po.formula", _CHILD_FORMULA, rig_path)
+        # Stamp the per-child formula so graph_run routes each through the right
+        # loop. `_bd_set_metadata` also adds a `formula:<name>` label, which is
+        # the only per-bead stamp beads-rust honors (no arbitrary metadata).
+        _bd_set_metadata(child_id, "po.formula", c["formula"], rig_path)
         child_ids[c["key"]] = child_id
-        logger.info("agentic-epic: created %s (%s)", child_id, c["title"][:60])
+        logger.info(
+            "agentic-epic: created %s (%s) [%s]", child_id, c["title"][:60], c["formula"]
+        )
 
-    # Second pass: wire blocks edges now that every child exists.
-    for c in plan:
-        for dep_key in c["depends_on"]:
-            _bd_dep_add(child_ids[c["key"]], child_ids[dep_key], rig_path)
+    # Second pass: wire blocks edges now that every child exists — declared deps
+    # plus coupling-derived serialization (blocks only between coupled children).
+    for child_key, prereq_key in _blocks_edges(plan):
+        _bd_dep_add(child_ids[child_key], child_ids[prereq_key], rig_path)
     return list(child_ids.values())
 
 
 def _plan_lanes(plan: list[dict[str, Any]]) -> list[list[str]]:
-    """Group child keys into dependency *levels* over the ``depends_on`` DAG.
+    """Group child keys into dependency *levels* over the **resolved** blocks DAG.
 
-    Each returned inner list is a set of children with no unsatisfied
-    prerequisites at that level — i.e. they run **in parallel**. Successive
-    lists are **stacked** (a level waits for all earlier levels). This is the
-    parallel-where-independent / serial-where-coupled shape the operator gets;
-    used by the dry-run to show the lanes without dispatching anything.
+    The DAG is :func:`_blocks_edges` (declared ``depends_on`` plus
+    coupling-derived serialization), not raw ``depends_on``, so the lanes reflect
+    the real conflict-safe shape — coupled children that the planner left
+    unordered still show up stacked. Each returned inner list is a set of
+    children with no unsatisfied prerequisites at that level — i.e. they run **in
+    parallel**. Successive lists are **stacked** (a level waits for all earlier
+    levels). Used by the dry-run to show the lanes without dispatching anything.
     """
-    deps = {c["key"]: set(c["depends_on"]) for c in plan}
+    deps: dict[str, set[str]] = {c["key"]: set() for c in plan}
+    for child_key, prereq_key in _blocks_edges(plan):
+        deps[child_key].add(prereq_key)
     done: set[str] = set()
     lanes: list[list[str]] = []
     remaining = set(deps)
@@ -226,13 +337,17 @@ def _dry_run_summary(
 ) -> dict[str, Any]:
     """Describe what a real run would do, without creating beads or dispatching.
 
-    In shared-branch mode this surfaces the integration-branch name, the single
-    draft PR that would be opened, and the parallel/serial lanes derived from
-    the planner's ``plan.json`` (best-effort — a stub planner may not have
-    written one). Satisfies the dry-run acceptance criterion (AC1).
+    Surfaces the four phases (PRD artifact, decomposition + coupling map,
+    plan-critic verdict already gated by the caller, and the shared-branch
+    dispatch shape) so the operator sees the whole plan up front. In
+    shared-branch mode it also surfaces the integration-branch name, the single
+    draft PR that would be opened, and the parallel/serial lanes. Best-effort — a
+    stub planner may not have written a parseable ``plan.json``. Satisfies the
+    dry-run acceptance criterion (AC1).
     """
     logger.info("agentic-epic: dry-run — skipping bead creation + dispatch")
     out: dict[str, Any] = {"status": "dry-run", "epic_id": epic_id, "children": []}
+    out["prd"] = _PRD_FILE if (run_dir / _PRD_FILE).exists() else None
     if shared_branch:
         out["shared_branch"] = True
         out["epic_branch"] = sb.epic_branch_name(epic_id)
@@ -242,6 +357,11 @@ def _dry_run_summary(
     except ValueError:
         return out  # no parseable plan (common under StubBackend) — basic summary
     out["children"] = [f"{epic_id}.{c['key']}" for c in plan]
+    coupled = _coupling_map(plan)
+    out["coupling"] = [list(pair) for pair in coupled]
+    out["blocks_edges"] = [list(e) for e in _blocks_edges(plan)]
+    if coupled:
+        logger.info("agentic-epic: dry-run — coupled (shared-file) pairs: %s", coupled)
     if shared_branch:
         lanes = _plan_lanes(plan)
         out["lanes"] = lanes
@@ -265,29 +385,31 @@ def agentic_epic(
     iter_cap: int = 2,
     max_children: int = 12,
     dry_run: bool = False,
-    shared_branch: bool = False,
+    shared_branch: bool = True,
     base_branch: str = "main",
 ) -> dict[str, Any]:
-    """Plan an epic from its goal, create stamped child beads, and fan them out.
+    """Scope, plan, and dispatch an epic from its goal as one shared-branch PR.
 
-    The epic bead's *description* is the goal. A planner decomposes it into
-    children; a plan-critic gates the decomposition; the flow then creates the
-    children (each stamped ``po.formula=software-dev-agentic``, wired with
-    ``bd dep`` order edges) and dispatches them via ``graph_run`` so each runs
-    the normal agentic worker→critic loop and ends at its own PR. Never merges.
+    The epic bead's *description* is the goal. Four phases run in order: a **PRD**
+    author scopes the goal (problem / acceptance criteria / surfaces); a
+    **planner** decomposes it into children (each declaring the files it
+    ``touches`` + any real ``depends_on``); a **plan-critic** gates the
+    decomposition (coverage, sizing, deps, and coupling); then the flow creates
+    the children (each stamped with its resolved ``po.formula``, wired with
+    ``blocks`` edges **only between coupled children**) and **dispatches**.
 
     The signature carries the dispatcher-required ``(issue_id-equivalent)``
     triple as ``(epic_id, rig, rig_path)`` — ``epic_id`` is the root.
 
-    **Shared-branch mode** (``shared_branch=True``, default OFF): instead of N
-    per-child PRs, the whole epic lands as one integration branch
-    ``epic/<epic-id>`` + one draft PR. The flow cuts the epic branch off
-    ``base_branch``, opens the draft PR, then fans the children out via
-    ``graph_run`` threading ``epic_branch`` / ``parent_epic_id`` to each child
-    run — so each child branches off the **current epic tip** (parallel where
-    independent, stacked along ``blocks`` chains) and is merged into the epic
-    branch on critic-pass. At the end the draft PR is flipped to ready. Default
-    OFF leaves the per-child-PR path exactly as before.
+    **Shared-branch mode** (``shared_branch=True``, the **default**): the whole
+    epic lands as one integration branch ``epic/<epic-id>`` + one draft PR. The
+    flow cuts the epic branch off ``base_branch``, opens the draft PR, then fans
+    the children out via ``graph_run`` threading ``epic_branch`` /
+    ``parent_epic_id`` to each child run — so each child branches off the
+    **current epic tip** (parallel where independent, stacked along ``blocks``
+    chains) and is merged into the epic branch on critic-pass. At the end the
+    draft PR is flipped to ready. Pass ``shared_branch=False`` to fall back to the
+    legacy per-child-PR path (N independent PRs, one per child).
     """
     logger = get_run_logger()
     rig_path_p = Path(rig_path).expanduser().resolve()
@@ -305,7 +427,26 @@ def agentic_epic(
     (run_dir / "goal.md").write_text(goal or f"(no description on {epic_id})")
 
     try:
-        # ── Phase 1: plan (actor-critic on the decomposition) ──────────────
+        # ── Phase 1: PRD (scope the goal before decomposing it) ─────────────
+        agent_step(
+            agent_dir=_AGENTS_DIR / "agentic-epic-prd",
+            task=_AGENTS_DIR / "agentic-epic-prd" / "task.md",
+            seed_id=epic_id,
+            rig_path=str(rig_path_p),
+            run_dir=run_dir,
+            step="epic-prd",
+            iter_n=1,
+            ctx={
+                "pack_path": str(pack_path_p),
+                "prd_file": _PRD_FILE,
+                "revision_note": "",
+            },
+            verdict_keywords=("complete", "failed"),
+            dry_run=dry_run,
+        )
+        logger.info("agentic-epic: PRD written to %s", run_dir / _PRD_FILE)
+
+        # ── Phase 2: plan (actor-critic on the decomposition) ──────────────
         plan_verdict = ""
         fix_list = ""
         for iter_n in range(1, plan_iter_cap + 1):
@@ -321,6 +462,7 @@ def agentic_epic(
                     "iter": iter_n,
                     "pack_path": str(pack_path_p),
                     "plan_file": _PLAN_FILE,
+                    "prd_file": _PRD_FILE,
                     "max_children": max_children,
                     "child_formula": _CHILD_FORMULA,
                     "revision_note": _plan_revision_note(fix_list),
@@ -336,7 +478,7 @@ def agentic_epic(
                 run_dir=run_dir,
                 step="epic-plan-critic",
                 iter_n=iter_n,
-                ctx={"iter": iter_n, "plan_file": _PLAN_FILE},
+                ctx={"iter": iter_n, "plan_file": _PLAN_FILE, "prd_file": _PRD_FILE},
                 verdict_keywords=("pass", "fail"),
                 dry_run=dry_run,
             )
@@ -351,7 +493,7 @@ def agentic_epic(
                 f"agentic-epic: plan did not pass critic after {plan_iter_cap} iter(s)"
             )
 
-        # ── Phase 2: create the stamped child beads ────────────────────────
+        # ── Phase 3: create the stamped child beads ────────────────────────
         if dry_run:
             return _dry_run_summary(epic_id, run_dir, max_children, shared_branch, logger)
 
@@ -359,7 +501,7 @@ def agentic_epic(
         child_ids = _create_children(epic_id, plan, rig_path_p, logger)
         logger.info("agentic-epic: created %d child bead(s): %s", len(child_ids), child_ids)
 
-        # ── Phase 3a: shared-branch setup (one integration branch + draft PR) ──
+        # ── Phase 4a: shared-branch setup (one integration branch + draft PR) ──
         epic_branch = ""
         pr_info: dict[str, Any] | None = None
         extra_kwargs: dict[str, Any] | None = None
@@ -384,7 +526,7 @@ def agentic_epic(
                 epic_branch, branch_info.get("created"), pr_info.get("url") or "(none)",
             )
 
-        # ── Phase 3b: fan out (each child runs software-dev-agentic) ─────────
+        # ── Phase 4b: fan out (each child runs software-dev-agentic) ─────────
         dispatch = graph_run(
             root_id=epic_id,
             rig=rig,
@@ -396,7 +538,7 @@ def agentic_epic(
             extra_formula_kwargs=extra_kwargs,
         )
 
-        # ── Phase 3c: shared-branch finalize (mark the single PR ready) ──────
+        # ── Phase 4c: shared-branch finalize (mark the single PR ready) ──────
         if shared_branch:
             ready = sb.mark_pr_ready(rig_path_p, branch=epic_branch)
             sb.cleanup_integration_worktree(rig_path_p, epic_id)
