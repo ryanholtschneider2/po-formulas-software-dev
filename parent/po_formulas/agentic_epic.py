@@ -375,6 +375,36 @@ def _dry_run_summary(
     return out
 
 
+def _integration_summary(dispatch: dict[str, Any]) -> str:
+    """One markdown line per child — which landed on the branch vs. were dropped.
+
+    Feeds the acceptance-critic so it knows which children's work is actually in
+    the integrated diff. A dropped child (merge conflict or critic-fail) is the
+    usual source of an unmet PRD acceptance criterion, so naming them explicitly
+    keeps the critic from assuming the whole plan shipped.
+    """
+    results = (dispatch or {}).get("results") or {}
+    if not results:
+        return "(no per-child results reported)"
+    lines: list[str] = []
+    for cid, res in sorted(results.items()):
+        if isinstance(res, dict):
+            integ = res.get("integration") or {}
+            if integ.get("merged"):
+                lines.append(f"- `{cid}`: LANDED (integrated onto the branch)")
+            elif integ.get("conflict"):
+                lines.append(
+                    f"- `{cid}`: DROPPED — merge conflict, work NOT on the branch "
+                    f"({(integ.get('reason') or '')[:140]})"
+                )
+            else:
+                detail = integ.get("reason") or res.get("status") or "unknown"
+                lines.append(f"- `{cid}`: DROPPED — not integrated ({str(detail)[:140]})")
+        else:
+            lines.append(f"- `{cid}`: FAILED — {str(res)[:140]}")
+    return "\n".join(lines)
+
+
 @flow(name="agentic_epic", flow_run_name="{epic_id}", log_prints=True)
 def agentic_epic(
     epic_id: str,
@@ -408,10 +438,13 @@ def agentic_epic(
     ``parent_epic_id`` to each child run — so each child branches off the
     **current epic tip** (parallel where independent, stacked along ``blocks``
     chains), is merged into the epic branch on critic-pass, and **never opens its
-    own PR**. Only at finalize, once every child has integrated, is the single
-    PR opened ready-for-review — so the PR-sheriff can never merge an incomplete
-    epic. Pass ``shared_branch=False`` to fall back to the legacy per-child-PR
-    path (N independent PRs, one per child).
+    own PR**. At finalize, once every child has integrated, an **epic
+    acceptance-critic** reads the PRD against the *assembled* diff (the only check
+    that does — per-child critics judged slices in isolation): on PASS the single
+    PR is opened ready-for-review; on FAIL it is opened as a **draft** with the
+    gap list, so the PR-sheriff can never auto-merge an incomplete epic. Pass
+    ``shared_branch=False`` to fall back to the legacy per-child-PR path (N
+    independent PRs, one per child).
     """
     logger = get_run_logger()
     rig_path_p = Path(rig_path).expanduser().resolve()
@@ -538,7 +571,46 @@ def agentic_epic(
         # a complete epic.
         if shared_branch:
             ahead = sb.commits_ahead(rig_path_p, base_branch, epic_branch)
+            accept_verdict = "n/a"
             if ahead > 0:
+                # Epic acceptance-critic: the ONLY check that reads the PRD against
+                # the assembled diff. Per-child critics judged slices in isolation;
+                # this catches dropped children, unmet acceptance criteria, and hard
+                # PRD constraints (a required skill, an autonomy rule) the build
+                # ignored. FAIL → open the PR as a DRAFT so the sheriff can't
+                # auto-merge a gapped epic; the gap list lives in
+                # critique-epic-acceptance.md and the PR body.
+                if dry_run:
+                    accept_verdict = "pass"
+                else:
+                    accept = agent_step(
+                        agent_dir=_AGENTS_DIR / "agentic-epic-acceptance-critic",
+                        task=_AGENTS_DIR / "agentic-epic-acceptance-critic" / "task.md",
+                        seed_id=epic_id,
+                        rig_path=str(rig_path_p),
+                        run_dir=run_dir,
+                        step="epic-acceptance-critic",
+                        iter_n=1,
+                        ctx={
+                            "pack_path": str(pack_path_p),
+                            "prd_file": _PRD_FILE,
+                            "epic_branch": epic_branch,
+                            "base_branch": base_branch,
+                            "integration_summary": _integration_summary(dispatch),
+                        },
+                        verdict_keywords=("pass", "fail"),
+                    )
+                    accept_verdict = accept.verdict
+                draft = accept_verdict != "pass"
+                gap_note = (
+                    ""
+                    if accept_verdict == "pass"
+                    else (
+                        "\n\nThis epic did NOT fully satisfy its PRD — opened as a "
+                        "DRAFT. Read `critique-epic-acceptance.md` in the run dir for "
+                        "the per-criterion verdict + gap list before merging."
+                    )
+                )
                 pr_info = dict(
                     sb.open_draft_pr(
                         rig_path_p,
@@ -546,20 +618,26 @@ def agentic_epic(
                         base_branch=base_branch,
                         title=f"[epic] {epic_id}",
                         body=(goal or f"agentic-epic {epic_id}")
-                        + f"\n\nShared-integration-branch epic. Children: {child_ids}",
-                        draft=False,
+                        + f"\n\nShared-integration-branch epic. Children: {child_ids}"
+                        + f"\n\n**Epic acceptance critic: {accept_verdict.upper()}**"
+                        + gap_note,
+                        draft=draft,
                     )
                 )
+                pr_info["acceptance_verdict"] = accept_verdict
             else:
                 pr_info = {
                     "opened": False,
                     "url": "",
                     "reason": "no children integrated commits — no PR",
+                    "acceptance_verdict": "n/a",
                 }
             sb.cleanup_integration_worktree(rig_path_p, epic_id)
             logger.info(
-                "agentic-epic: shared-branch finalize — PR=%s (%d commit(s) ahead)",
-                pr_info.get("url") or f"(none: {pr_info.get('reason')})", ahead,
+                "agentic-epic: shared-branch finalize — PR=%s (acceptance=%s, %d commit(s) ahead)",
+                pr_info.get("url") or f"(none: {pr_info.get('reason')})",
+                accept_verdict,
+                ahead,
             )
 
         # The epic closes only when every discovered child has closed — that is
