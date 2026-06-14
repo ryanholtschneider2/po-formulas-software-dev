@@ -54,13 +54,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from prefect import flow, get_run_logger
 from prefect_orchestration.agent_step import agent_step
-from prefect_orchestration.beads_meta import claim_issue, close_issue, create_child_bead
+from prefect_orchestration.beads_meta import (
+    claim_issue,
+    close_issue,
+    create_child_bead,
+    list_epic_children,
+)
 
 from po_formulas import shared_branch as sb
 from po_formulas.agentic import _bd_set_metadata, _read_text
@@ -146,7 +152,9 @@ def _parse_plan(run_dir: Path, max_children: int) -> list[dict[str, Any]]:
         description = str(c.get("description") or "").strip()
         if not title or not description:
             raise ValueError(f"child {key!r} is missing a title or description")
-        depends_on = [str(d).strip() for d in (c.get("depends_on") or []) if str(d).strip()]
+        depends_on = [
+            str(d).strip() for d in (c.get("depends_on") or []) if str(d).strip()
+        ]
         raw_touches = c.get("touches") or []
         if not isinstance(raw_touches, list):
             raise ValueError(f"child {key!r} has a non-list 'touches'")
@@ -290,7 +298,10 @@ def _create_children(
         _bd_set_metadata(child_id, "po.formula", c["formula"], rig_path)
         child_ids[c["key"]] = child_id
         logger.info(
-            "agentic-epic: created %s (%s) [%s]", child_id, c["title"][:60], c["formula"]
+            "agentic-epic: created %s (%s) [%s]",
+            child_id,
+            c["title"][:60],
+            c["formula"],
         )
 
     # Second pass: wire blocks edges now that every child exists — declared deps
@@ -370,7 +381,8 @@ def _dry_run_summary(
             logger.info("agentic-epic: dry-run lane %d (%s): %s", i, kind, lane)
         logger.info(
             "agentic-epic: dry-run — would create %s + open 1 PR at finalize, %d lane(s)",
-            out["epic_branch"], len(lanes),
+            out["epic_branch"],
+            len(lanes),
         )
     return out
 
@@ -405,6 +417,127 @@ def _integration_summary(dispatch: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# Epic-process beads (the PRD / plan / plan-critic agent_step iter beads) are
+# parent-child dependents of the epic too, but they are not planned work — skip
+# them when probing for an existing decomposition.
+_EPIC_PROCESS_TITLE = re.compile(r"^epic-(prd|plan|plan-critic)\b", re.IGNORECASE)
+
+
+def _existing_planned_children(epic_id: str, rig_path: Path) -> list[str]:
+    """Open/in-progress *planned* children already linked under the epic.
+
+    Idempotency probe. A prior dispatch that decomposed this epic leaves its
+    planned children as non-closed parent-child dependents; we must NOT
+    re-decompose on a repeat dispatch. This matters most on the **br** backend,
+    where the deterministic ``{epic}.{key}`` child ids are rejected and children
+    get fresh auto-ids — so a re-run mints a *duplicate* child set with nothing
+    to collide against (the 2026-06-14 runaway: 43 concurrent flow runs from one
+    epic re-decomposed across pulses). Excludes the transient epic-process beads.
+    """
+    try:
+        nodes = list_epic_children(epic_id, mode="deps", rig_path=rig_path)
+    except Exception:  # discovery is best-effort; never block dispatch on it
+        return []
+    return [
+        str(n["id"])
+        for n in nodes
+        if not _EPIC_PROCESS_TITLE.match(str(n.get("title", "")).strip())
+    ]
+
+
+def _decompose_epic(
+    epic_id: str,
+    rig_path_p: Path,
+    pack_path_p: Path,
+    run_dir: Path,
+    plan_iter_cap: int,
+    max_children: int,
+    shared_branch: bool,
+    dry_run: bool,
+    logger: Any,
+) -> list[str] | dict[str, Any]:
+    """Phases 1-3: PRD -> plan (actor-critic) -> create stamped children.
+
+    Returns the created child ids, or (for ``dry_run``) the dry-run summary dict.
+    Raises if the plan never passes the critic. Factored out of ``agentic_epic``
+    so the flow can SKIP it on an idempotent re-run (children already exist).
+    """
+    # ── Phase 1: PRD (scope the goal before decomposing it) ─────────────
+    agent_step(
+        agent_dir=_AGENTS_DIR / "agentic-epic-prd",
+        task=_AGENTS_DIR / "agentic-epic-prd" / "task.md",
+        seed_id=epic_id,
+        rig_path=str(rig_path_p),
+        run_dir=run_dir,
+        step="epic-prd",
+        iter_n=1,
+        ctx={
+            "pack_path": str(pack_path_p),
+            "prd_file": _PRD_FILE,
+            "revision_note": "",
+        },
+        verdict_keywords=("complete", "failed"),
+        dry_run=dry_run,
+    )
+    logger.info("agentic-epic: PRD written to %s", run_dir / _PRD_FILE)
+
+    # ── Phase 2: plan (actor-critic on the decomposition) ──────────────
+    plan_verdict = ""
+    fix_list = ""
+    for iter_n in range(1, plan_iter_cap + 1):
+        agent_step(
+            agent_dir=_AGENTS_DIR / "agentic-epic-planner",
+            task=_AGENTS_DIR / "agentic-epic-planner" / "task.md",
+            seed_id=epic_id,
+            rig_path=str(rig_path_p),
+            run_dir=run_dir,
+            step="epic-plan",
+            iter_n=iter_n,
+            ctx={
+                "iter": iter_n,
+                "pack_path": str(pack_path_p),
+                "plan_file": _PLAN_FILE,
+                "prd_file": _PRD_FILE,
+                "max_children": max_children,
+                "child_formula": _CHILD_FORMULA,
+                "revision_note": _plan_revision_note(fix_list),
+            },
+            verdict_keywords=("complete", "failed"),
+            dry_run=dry_run,
+        )
+        review = agent_step(
+            agent_dir=_AGENTS_DIR / "agentic-epic-plan-critic",
+            task=_AGENTS_DIR / "agentic-epic-plan-critic" / "task.md",
+            seed_id=epic_id,
+            rig_path=str(rig_path_p),
+            run_dir=run_dir,
+            step="epic-plan-critic",
+            iter_n=iter_n,
+            ctx={"iter": iter_n, "plan_file": _PLAN_FILE, "prd_file": _PRD_FILE},
+            verdict_keywords=("pass", "fail"),
+            dry_run=dry_run,
+        )
+        plan_verdict = "pass" if dry_run else review.verdict
+        logger.info("agentic-epic: plan iter %s critic=%s", iter_n, plan_verdict)
+        if plan_verdict == "pass":
+            break
+        fix_list = _read_text(run_dir / f"critique-epic-plan-iter-{iter_n}.md")
+
+    if plan_verdict != "pass":
+        raise RuntimeError(
+            f"agentic-epic: plan did not pass critic after {plan_iter_cap} iter(s)"
+        )
+
+    # ── Phase 3: create the stamped child beads ────────────────────────
+    if dry_run:
+        return _dry_run_summary(epic_id, run_dir, max_children, shared_branch, logger)
+
+    plan = _parse_plan(run_dir, max_children)
+    child_ids = _create_children(epic_id, plan, rig_path_p, logger)
+    logger.info("agentic-epic: created %d child bead(s): %s", len(child_ids), child_ids)
+    return child_ids
+
+
 @flow(name="agentic_epic", flow_run_name="{epic_id}", log_prints=True)
 def agentic_epic(
     epic_id: str,
@@ -417,6 +550,7 @@ def agentic_epic(
     dry_run: bool = False,
     shared_branch: bool = True,
     base_branch: str = "main",
+    force_replan: bool = False,
 ) -> dict[str, Any]:
     """Scope, plan, and dispatch an epic from its goal as one shared-branch PR.
 
@@ -462,79 +596,41 @@ def agentic_epic(
     (run_dir / "goal.md").write_text(goal or f"(no description on {epic_id})")
 
     try:
-        # ── Phase 1: PRD (scope the goal before decomposing it) ─────────────
-        agent_step(
-            agent_dir=_AGENTS_DIR / "agentic-epic-prd",
-            task=_AGENTS_DIR / "agentic-epic-prd" / "task.md",
-            seed_id=epic_id,
-            rig_path=str(rig_path_p),
-            run_dir=run_dir,
-            step="epic-prd",
-            iter_n=1,
-            ctx={
-                "pack_path": str(pack_path_p),
-                "prd_file": _PRD_FILE,
-                "revision_note": "",
-            },
-            verdict_keywords=("complete", "failed"),
-            dry_run=dry_run,
+        # ── Phases 1-3: decompose, UNLESS this epic was already decomposed ──
+        # Idempotency guard (2026-06-14 runaway fix): if planned children already
+        # exist under the epic, do NOT re-decompose — reuse them. Phase 4 below
+        # re-dispatches whatever child set we end up with, so a repeat dispatch
+        # produces exactly one child set instead of minting duplicates.
+        reuse = (
+            []
+            if (dry_run or force_replan)
+            else _existing_planned_children(epic_id, rig_path_p)
         )
-        logger.info("agentic-epic: PRD written to %s", run_dir / _PRD_FILE)
-
-        # ── Phase 2: plan (actor-critic on the decomposition) ──────────────
-        plan_verdict = ""
-        fix_list = ""
-        for iter_n in range(1, plan_iter_cap + 1):
-            agent_step(
-                agent_dir=_AGENTS_DIR / "agentic-epic-planner",
-                task=_AGENTS_DIR / "agentic-epic-planner" / "task.md",
-                seed_id=epic_id,
-                rig_path=str(rig_path_p),
-                run_dir=run_dir,
-                step="epic-plan",
-                iter_n=iter_n,
-                ctx={
-                    "iter": iter_n,
-                    "pack_path": str(pack_path_p),
-                    "plan_file": _PLAN_FILE,
-                    "prd_file": _PRD_FILE,
-                    "max_children": max_children,
-                    "child_formula": _CHILD_FORMULA,
-                    "revision_note": _plan_revision_note(fix_list),
-                },
-                verdict_keywords=("complete", "failed"),
-                dry_run=dry_run,
+        if reuse:
+            logger.warning(
+                "agentic-epic: %s already has %d planned child(ren) %s — skipping "
+                "decomposition; reusing the existing set (idempotent re-run). Pass "
+                "force_replan=True to re-decompose.",
+                epic_id,
+                len(reuse),
+                reuse,
             )
-            review = agent_step(
-                agent_dir=_AGENTS_DIR / "agentic-epic-plan-critic",
-                task=_AGENTS_DIR / "agentic-epic-plan-critic" / "task.md",
-                seed_id=epic_id,
-                rig_path=str(rig_path_p),
-                run_dir=run_dir,
-                step="epic-plan-critic",
-                iter_n=iter_n,
-                ctx={"iter": iter_n, "plan_file": _PLAN_FILE, "prd_file": _PRD_FILE},
-                verdict_keywords=("pass", "fail"),
-                dry_run=dry_run,
+            child_ids = reuse
+        else:
+            decomposed = _decompose_epic(
+                epic_id,
+                rig_path_p,
+                pack_path_p,
+                run_dir,
+                plan_iter_cap,
+                max_children,
+                shared_branch,
+                dry_run,
+                logger,
             )
-            plan_verdict = "pass" if dry_run else review.verdict
-            logger.info("agentic-epic: plan iter %s critic=%s", iter_n, plan_verdict)
-            if plan_verdict == "pass":
-                break
-            fix_list = _read_text(run_dir / f"critique-epic-plan-iter-{iter_n}.md")
-
-        if plan_verdict != "pass":
-            raise RuntimeError(
-                f"agentic-epic: plan did not pass critic after {plan_iter_cap} iter(s)"
-            )
-
-        # ── Phase 3: create the stamped child beads ────────────────────────
-        if dry_run:
-            return _dry_run_summary(epic_id, run_dir, max_children, shared_branch, logger)
-
-        plan = _parse_plan(run_dir, max_children)
-        child_ids = _create_children(epic_id, plan, rig_path_p, logger)
-        logger.info("agentic-epic: created %d child bead(s): %s", len(child_ids), child_ids)
+            if isinstance(decomposed, dict):
+                return decomposed  # dry-run summary
+            child_ids = decomposed
 
         # ── Phase 4a: shared-branch setup (one integration branch, NO PR yet) ──
         # The PR is opened at FINALIZE, only after every child has integrated, so
@@ -550,7 +646,8 @@ def agentic_epic(
             extra_kwargs = {"epic_branch": epic_branch, "parent_epic_id": epic_id}
             logger.info(
                 "agentic-epic: shared-branch %s (created=%s) — PR deferred to finalize",
-                epic_branch, branch_info.get("created"),
+                epic_branch,
+                branch_info.get("created"),
             )
 
         # ── Phase 4b: fan out (each child runs software-dev-agentic) ─────────

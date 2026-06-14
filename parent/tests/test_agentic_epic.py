@@ -36,8 +36,18 @@ def test_parse_plan_valid(tmp_path):
         tmp_path,
         {
             "children": [
-                {"key": "1", "title": "add model", "description": "d1", "depends_on": []},
-                {"key": "2", "title": "wire route", "description": "d2", "depends_on": ["1"]},
+                {
+                    "key": "1",
+                    "title": "add model",
+                    "description": "d1",
+                    "depends_on": [],
+                },
+                {
+                    "key": "2",
+                    "title": "wire route",
+                    "description": "d2",
+                    "depends_on": ["1"],
+                },
             ]
         },
     )
@@ -51,13 +61,25 @@ def test_parse_plan_valid(tmp_path):
     [
         ({"children": []}, "no non-empty 'children'"),
         ({"nope": 1}, "no non-empty 'children'"),
-        ({"children": [{"key": "1", "title": "", "description": "d"}]}, "missing a title"),
         (
-            {"children": [{"key": "1", "title": "t", "description": "d"}, {"key": "1", "title": "u", "description": "d"}]},
+            {"children": [{"key": "1", "title": "", "description": "d"}]},
+            "missing a title",
+        ),
+        (
+            {
+                "children": [
+                    {"key": "1", "title": "t", "description": "d"},
+                    {"key": "1", "title": "u", "description": "d"},
+                ]
+            },
             "missing/duplicate key",
         ),
         (
-            {"children": [{"key": "1", "title": "t", "description": "d", "depends_on": ["9"]}]},
+            {
+                "children": [
+                    {"key": "1", "title": "t", "description": "d", "depends_on": ["9"]}
+                ]
+            },
             "unknown key",
         ),
     ],
@@ -76,7 +98,11 @@ def test_parse_plan_missing_file(tmp_path):
 def test_parse_plan_over_cap(tmp_path):
     _write_plan(
         tmp_path,
-        {"children": [{"key": str(i), "title": "t", "description": "d"} for i in range(5)]},
+        {
+            "children": [
+                {"key": str(i), "title": "t", "description": "d"} for i in range(5)
+            ]
+        },
     )
     with pytest.raises(ValueError, match="max_children=3"):
         ae._parse_plan(tmp_path, max_children=3)
@@ -93,7 +119,12 @@ def test_agentic_epic_creates_stamped_children_and_dispatches(tmp_path, monkeypa
     plan = {
         "children": [
             {"key": "1", "title": "add model", "description": "d1", "depends_on": []},
-            {"key": "2", "title": "wire route", "description": "d2", "depends_on": ["1"]},
+            {
+                "key": "2",
+                "title": "wire route",
+                "description": "d2",
+                "depends_on": ["1"],
+            },
         ]
     }
 
@@ -122,11 +153,17 @@ def test_agentic_epic_creates_stamped_children_and_dispatches(tmp_path, monkeypa
     monkeypatch.setattr(
         ae,
         "create_child_bead",
-        lambda *, parent_id, child_id, **k: created.append((parent_id, child_id)) or child_id,
+        lambda *, parent_id, child_id, **k: (
+            created.append((parent_id, child_id)) or child_id
+        ),
     )
-    monkeypatch.setattr(ae, "_bd_set_metadata", lambda i, k, v, rp: stamped.append((i, k, v)))
+    monkeypatch.setattr(
+        ae, "_bd_set_metadata", lambda i, k, v, rp: stamped.append((i, k, v))
+    )
     monkeypatch.setattr(ae, "_bd_dep_add", lambda c, d, rp: deps.append((c, d)))
-    monkeypatch.setattr(ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"})
+    monkeypatch.setattr(
+        ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"}
+    )
     monkeypatch.setattr(ae, "close_issue", lambda i, **k: closed.append(i))
 
     result = ae.agentic_epic.fn(
@@ -154,16 +191,119 @@ def test_agentic_epic_creates_stamped_children_and_dispatches(tmp_path, monkeypa
     assert result["children"] == [f"{epic_id}.1", f"{epic_id}.2"]
 
 
-def test_agentic_epic_dry_run_skips_creation(tmp_path, monkeypatch):
+def test_agentic_epic_idempotent_reuses_existing_children(tmp_path, monkeypatch):
+    """A repeat dispatch with planned children already under the epic must NOT
+    re-decompose: no `agent_step`, no new beads. It reuses the existing set and
+    re-dispatches. Guards the 2026-06-14 runaway (the br backend mints fresh
+    child ids per run, so re-decomposition duplicated the whole child set)."""
+    epic_id = "rig-epic9"
+    existing = ["rig-c1", "rig-c2", "rig-c3"]
+
+    def boom_agent_step(*a, **k):
+        pytest.fail("idempotent re-run must not re-decompose (agent_step called)")
+
+    def boom_create(*a, **k):
+        pytest.fail("idempotent re-run must not create new child beads")
+
+    dispatched: dict = {}
+    closed: list[str] = []
+
     monkeypatch.setattr(ae, "get_run_logger", lambda: _NULL_LOGGER)
-    monkeypatch.setattr(ae, "agent_step", lambda **k: type("R", (), {"verdict": "pass", "closed_by": "x"})())
+    monkeypatch.setattr(ae, "claim_issue", lambda *a, **k: None)
     monkeypatch.setattr(ae, "_bd_show_description", lambda *a, **k: "goal")
     monkeypatch.setattr(
-        ae, "create_child_bead", lambda **k: pytest.fail("dry-run must not create beads")
+        ae, "_existing_planned_children", lambda eid, rp: list(existing)
     )
-    monkeypatch.setattr(ae, "graph_run", lambda **k: pytest.fail("dry-run must not dispatch"))
+    monkeypatch.setattr(ae, "agent_step", boom_agent_step)
+    monkeypatch.setattr(ae, "create_child_bead", boom_create)
+    monkeypatch.setattr(
+        ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"}
+    )
+    monkeypatch.setattr(ae, "close_issue", lambda i, **k: closed.append(i))
 
-    result = ae.agentic_epic.fn(epic_id="e1", rig="r", rig_path=str(tmp_path), dry_run=True)
+    result = ae.agentic_epic.fn(
+        epic_id=epic_id,
+        rig="rig",
+        rig_path=str(tmp_path),
+        shared_branch=False,
+    )
+
+    # Reused the existing children, dispatched them, closed the epic — no re-plan.
+    assert dispatched["root_id"] == epic_id
+    assert result["children"] == existing
+    assert closed == [epic_id]
+
+
+def test_agentic_epic_force_replan_redecomposes(tmp_path, monkeypatch):
+    """`force_replan=True` ignores existing children and decomposes fresh."""
+    epic_id = "rig-epic8"
+    plan = {
+        "children": [{"key": "1", "title": "t", "description": "d", "depends_on": []}]
+    }
+
+    def fake_agent_step(*, step, **kwargs):
+        if step == "epic-plan":
+            run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / ae._PLAN_FILE).write_text(json.dumps(plan))
+
+        class _R:
+            verdict = "pass"
+            closed_by = "agent"
+
+        return _R()
+
+    created: list[str] = []
+
+    monkeypatch.setattr(ae, "get_run_logger", lambda: _NULL_LOGGER)
+    monkeypatch.setattr(ae, "claim_issue", lambda *a, **k: None)
+    monkeypatch.setattr(ae, "_bd_show_description", lambda *a, **k: "goal")
+    # Existing children present, but force_replan must ignore them entirely.
+    monkeypatch.setattr(ae, "_existing_planned_children", lambda eid, rp: ["old-1"])
+    monkeypatch.setattr(ae, "agent_step", fake_agent_step)
+    monkeypatch.setattr(
+        ae,
+        "create_child_bead",
+        lambda *, parent_id, child_id, **k: created.append(child_id) or child_id,
+    )
+    monkeypatch.setattr(ae, "_bd_set_metadata", lambda *a, **k: None)
+    monkeypatch.setattr(ae, "_bd_dep_add", lambda *a, **k: None)
+    monkeypatch.setattr(ae, "graph_run", lambda **k: {"status": "ok"})
+    monkeypatch.setattr(ae, "close_issue", lambda *a, **k: None)
+
+    result = ae.agentic_epic.fn(
+        epic_id=epic_id,
+        rig="rig",
+        rig_path=str(tmp_path),
+        shared_branch=False,
+        force_replan=True,
+    )
+
+    # Re-decomposed: created the fresh child, did not reuse "old-1".
+    assert created == [f"{epic_id}.1"]
+    assert result["children"] == [f"{epic_id}.1"]
+
+
+def test_agentic_epic_dry_run_skips_creation(tmp_path, monkeypatch):
+    monkeypatch.setattr(ae, "get_run_logger", lambda: _NULL_LOGGER)
+    monkeypatch.setattr(
+        ae,
+        "agent_step",
+        lambda **k: type("R", (), {"verdict": "pass", "closed_by": "x"})(),
+    )
+    monkeypatch.setattr(ae, "_bd_show_description", lambda *a, **k: "goal")
+    monkeypatch.setattr(
+        ae,
+        "create_child_bead",
+        lambda **k: pytest.fail("dry-run must not create beads"),
+    )
+    monkeypatch.setattr(
+        ae, "graph_run", lambda **k: pytest.fail("dry-run must not dispatch")
+    )
+
+    result = ae.agentic_epic.fn(
+        epic_id="e1", rig="r", rig_path=str(tmp_path), dry_run=True
+    )
     assert result["status"] == "dry-run"
 
 
@@ -225,7 +365,12 @@ def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypa
 
     def fake_create(rp, eid, **k):
         calls["create"] = (str(eid), k)
-        return {"branch": f"epic/{eid}", "created": True, "pushed": True, "remote": True}
+        return {
+            "branch": f"epic/{eid}",
+            "created": True,
+            "pushed": True,
+            "remote": True,
+        }
 
     def fake_pr(rp, **k):
         calls["pr"] = k
@@ -238,15 +383,19 @@ def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypa
     monkeypatch.setattr(ae.sb, "open_draft_pr", fake_pr)
     monkeypatch.setattr(ae.sb, "mark_pr_ready", boom_ready)
     monkeypatch.setattr(
-        ae.sb, "commits_ahead",
+        ae.sb,
+        "commits_ahead",
         lambda rp, base, branch: calls.__setitem__("ahead", (base, branch)) or 2,
     )
     monkeypatch.setattr(
-        ae.sb, "cleanup_integration_worktree",
+        ae.sb,
+        "cleanup_integration_worktree",
         lambda rp, eid: calls.__setitem__("cleanup", str(eid)),
     )
     dispatched: dict = {}
-    monkeypatch.setattr(ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"})
+    monkeypatch.setattr(
+        ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"}
+    )
 
     result = ae.agentic_epic.fn(
         epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True
@@ -272,16 +421,26 @@ def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypa
     assert result["pr"]["url"] == "https://x/pull/9"
 
 
-def test_agentic_epic_shared_branch_no_pr_when_nothing_integrated(tmp_path, monkeypatch):
+def test_agentic_epic_shared_branch_no_pr_when_nothing_integrated(
+    tmp_path, monkeypatch
+):
     """If no child integrated a commit (commits_ahead==0), finalize opens NO PR."""
     epic_id = "rig-epic-empty"
     run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
-    plan = {"children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]}
+    plan = {
+        "children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]
+    }
     _patch_common(monkeypatch, run_dir, plan)
 
     monkeypatch.setattr(
-        ae.sb, "create_integration_branch",
-        lambda rp, eid, **k: {"branch": f"epic/{eid}", "created": True, "pushed": True, "remote": True},
+        ae.sb,
+        "create_integration_branch",
+        lambda rp, eid, **k: {
+            "branch": f"epic/{eid}",
+            "created": True,
+            "pushed": True,
+            "remote": True,
+        },
     )
     monkeypatch.setattr(ae.sb, "commits_ahead", lambda rp, base, branch: 0)
 
@@ -359,23 +518,38 @@ def test_agentic_epic_default_is_shared_branch(tmp_path, monkeypatch):
     branch + draft PR — shared-branch is the dispatch path, not opt-in."""
     epic_id = "rig-epic-default"
     run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
-    plan = {"children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]}
+    plan = {
+        "children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]
+    }
     _patch_common(monkeypatch, run_dir, plan)
 
     seen: dict = {}
     monkeypatch.setattr(
-        ae.sb, "create_integration_branch",
-        lambda rp, eid, **k: seen.__setitem__("create", str(eid))
-        or {"branch": f"epic/{eid}", "created": True, "pushed": True, "remote": True},
+        ae.sb,
+        "create_integration_branch",
+        lambda rp, eid, **k: (
+            seen.__setitem__("create", str(eid))
+            or {
+                "branch": f"epic/{eid}",
+                "created": True,
+                "pushed": True,
+                "remote": True,
+            }
+        ),
     )
     monkeypatch.setattr(
-        ae.sb, "open_draft_pr",
+        ae.sb,
+        "open_draft_pr",
         lambda rp, **k: {"opened": True, "url": "https://x/pull/1", "reason": ""},
     )
-    monkeypatch.setattr(ae.sb, "mark_pr_ready", lambda rp, **k: {"ready": True, "reason": ""})
+    monkeypatch.setattr(
+        ae.sb, "mark_pr_ready", lambda rp, **k: {"ready": True, "reason": ""}
+    )
     monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
     dispatched: dict = {}
-    monkeypatch.setattr(ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"})
+    monkeypatch.setattr(
+        ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"}
+    )
 
     # No shared_branch kwarg → default path.
     result = ae.agentic_epic.fn(epic_id=epic_id, rig="rig", rig_path=str(tmp_path))
@@ -394,7 +568,9 @@ def test_agentic_epic_shared_branch_false_opts_out(tmp_path, monkeypatch):
     extra_formula_kwargs (the legacy per-child-PR path, unchanged)."""
     epic_id = "rig-epic2"
     run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
-    plan = {"children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]}
+    plan = {
+        "children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]
+    }
     _patch_common(monkeypatch, run_dir, plan)
 
     def boom(*a, **k):
@@ -405,7 +581,9 @@ def test_agentic_epic_shared_branch_false_opts_out(tmp_path, monkeypatch):
     monkeypatch.setattr(ae.sb, "mark_pr_ready", boom)
 
     dispatched: dict = {}
-    monkeypatch.setattr(ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"})
+    monkeypatch.setattr(
+        ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"}
+    )
 
     result = ae.agentic_epic.fn(
         epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=False
@@ -430,13 +608,20 @@ def test_agentic_epic_shared_branch_dry_run(tmp_path, monkeypatch):
     }
     _patch_common(monkeypatch, run_dir, plan)
     monkeypatch.setattr(
-        ae.sb, "create_integration_branch",
+        ae.sb,
+        "create_integration_branch",
         lambda *a, **k: pytest.fail("dry-run must not create a branch"),
     )
-    monkeypatch.setattr(ae, "graph_run", lambda **k: pytest.fail("dry-run must not dispatch"))
+    monkeypatch.setattr(
+        ae, "graph_run", lambda **k: pytest.fail("dry-run must not dispatch")
+    )
 
     result = ae.agentic_epic.fn(
-        epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True, dry_run=True
+        epic_id=epic_id,
+        rig="rig",
+        rig_path=str(tmp_path),
+        shared_branch=True,
+        dry_run=True,
     )
     assert result["status"] == "dry-run"
     assert result["shared_branch"] is True
@@ -475,7 +660,11 @@ def test_parse_plan_accepts_touches_and_formula(tmp_path):
 def test_parse_plan_rejects_non_list_touches(tmp_path):
     _write_plan(
         tmp_path,
-        {"children": [{"key": "1", "title": "t", "description": "d", "touches": "foo.py"}]},
+        {
+            "children": [
+                {"key": "1", "title": "t", "description": "d", "touches": "foo.py"}
+            ]
+        },
     )
     with pytest.raises(ValueError, match="non-list 'touches'"):
         ae._parse_plan(tmp_path, max_children=12)
@@ -545,7 +734,9 @@ def test_prd_runs_before_decomposition(tmp_path, monkeypatch):
     planner decomposes)."""
     epic_id = "rig-prd1"
     run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
-    plan = {"children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]}
+    plan = {
+        "children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]
+    }
     order: list[str] = []
 
     def fake_agent_step(*, agent_dir, step, **kwargs):
@@ -558,7 +749,9 @@ def test_prd_runs_before_decomposition(tmp_path, monkeypatch):
     monkeypatch.setattr(ae, "get_run_logger", lambda: _NULL_LOGGER)
     monkeypatch.setattr(ae, "agent_step", fake_agent_step)
     monkeypatch.setattr(ae, "_bd_show_description", lambda *a, **k: "goal")
-    monkeypatch.setattr(ae, "graph_run", lambda **k: pytest.fail("dry-run must not dispatch"))
+    monkeypatch.setattr(
+        ae, "graph_run", lambda **k: pytest.fail("dry-run must not dispatch")
+    )
 
     ae.agentic_epic.fn(epic_id=epic_id, rig="r", rig_path=str(tmp_path), dry_run=True)
 
@@ -573,7 +766,9 @@ def test_plan_critic_loop_iterates_on_bad_plan(tmp_path, monkeypatch):
     epic_id = "rig-iter1"
     run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    good_plan = {"children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]}
+    good_plan = {
+        "children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]
+    }
 
     planner_iters: list[int] = []
     revision_notes: list[str] = []
@@ -598,14 +793,23 @@ def test_plan_critic_loop_iterates_on_bad_plan(tmp_path, monkeypatch):
     _patch_common(monkeypatch, run_dir, good_plan)
     monkeypatch.setattr(ae, "agent_step", fake_agent_step)
     monkeypatch.setattr(
-        ae.sb, "create_integration_branch",
-        lambda rp, eid, **k: {"branch": f"epic/{eid}", "created": True, "pushed": True, "remote": True},
+        ae.sb,
+        "create_integration_branch",
+        lambda rp, eid, **k: {
+            "branch": f"epic/{eid}",
+            "created": True,
+            "pushed": True,
+            "remote": True,
+        },
     )
     monkeypatch.setattr(
-        ae.sb, "open_draft_pr",
+        ae.sb,
+        "open_draft_pr",
         lambda rp, **k: {"opened": True, "url": "https://x/pull/2", "reason": ""},
     )
-    monkeypatch.setattr(ae.sb, "mark_pr_ready", lambda rp, **k: {"ready": True, "reason": ""})
+    monkeypatch.setattr(
+        ae.sb, "mark_pr_ready", lambda rp, **k: {"ready": True, "reason": ""}
+    )
     monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
     monkeypatch.setattr(ae, "graph_run", lambda **k: {"status": "ok"})
 
@@ -639,13 +843,27 @@ def test_per_child_formula_is_stamped(tmp_path, monkeypatch):
     }
     _patch_common(monkeypatch, run_dir, plan)
     stamped: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(ae, "_bd_set_metadata", lambda i, k, v, rp: stamped.append((i, k, v)))
     monkeypatch.setattr(
-        ae.sb, "create_integration_branch",
-        lambda rp, eid, **k: {"branch": f"epic/{eid}", "created": True, "pushed": True, "remote": True},
+        ae, "_bd_set_metadata", lambda i, k, v, rp: stamped.append((i, k, v))
     )
-    monkeypatch.setattr(ae.sb, "open_draft_pr", lambda rp, **k: {"opened": True, "url": "u", "reason": ""})
-    monkeypatch.setattr(ae.sb, "mark_pr_ready", lambda rp, **k: {"ready": True, "reason": ""})
+    monkeypatch.setattr(
+        ae.sb,
+        "create_integration_branch",
+        lambda rp, eid, **k: {
+            "branch": f"epic/{eid}",
+            "created": True,
+            "pushed": True,
+            "remote": True,
+        },
+    )
+    monkeypatch.setattr(
+        ae.sb,
+        "open_draft_pr",
+        lambda rp, **k: {"opened": True, "url": "u", "reason": ""},
+    )
+    monkeypatch.setattr(
+        ae.sb, "mark_pr_ready", lambda rp, **k: {"ready": True, "reason": ""}
+    )
     monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
     monkeypatch.setattr(ae, "graph_run", lambda **k: {"status": "ok"})
 
