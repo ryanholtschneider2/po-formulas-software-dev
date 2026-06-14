@@ -53,6 +53,7 @@ from prefect import flow, get_run_logger
 from prefect_orchestration.agent_step import agent_step
 from prefect_orchestration.beads_meta import claim_issue, close_issue, create_child_bead
 
+from po_formulas import shared_branch as sb
 from po_formulas.agentic import _bd_set_metadata, _read_text
 from po_formulas.graph import graph_run
 from po_formulas.software_dev import (
@@ -192,6 +193,68 @@ def _create_children(
     return list(child_ids.values())
 
 
+def _plan_lanes(plan: list[dict[str, Any]]) -> list[list[str]]:
+    """Group child keys into dependency *levels* over the ``depends_on`` DAG.
+
+    Each returned inner list is a set of children with no unsatisfied
+    prerequisites at that level — i.e. they run **in parallel**. Successive
+    lists are **stacked** (a level waits for all earlier levels). This is the
+    parallel-where-independent / serial-where-coupled shape the operator gets;
+    used by the dry-run to show the lanes without dispatching anything.
+    """
+    deps = {c["key"]: set(c["depends_on"]) for c in plan}
+    done: set[str] = set()
+    lanes: list[list[str]] = []
+    remaining = set(deps)
+    while remaining:
+        ready = sorted(k for k in remaining if deps[k] <= done)
+        if not ready:  # cycle / dangling — bail rather than loop forever
+            lanes.append(sorted(remaining))
+            break
+        lanes.append(ready)
+        done |= set(ready)
+        remaining -= set(ready)
+    return lanes
+
+
+def _dry_run_summary(
+    epic_id: str,
+    run_dir: Path,
+    max_children: int,
+    shared_branch: bool,
+    logger: Any,
+) -> dict[str, Any]:
+    """Describe what a real run would do, without creating beads or dispatching.
+
+    In shared-branch mode this surfaces the integration-branch name, the single
+    draft PR that would be opened, and the parallel/serial lanes derived from
+    the planner's ``plan.json`` (best-effort — a stub planner may not have
+    written one). Satisfies the dry-run acceptance criterion (AC1).
+    """
+    logger.info("agentic-epic: dry-run — skipping bead creation + dispatch")
+    out: dict[str, Any] = {"status": "dry-run", "epic_id": epic_id, "children": []}
+    if shared_branch:
+        out["shared_branch"] = True
+        out["epic_branch"] = sb.epic_branch_name(epic_id)
+        out["would_open_draft_pr"] = True
+    try:
+        plan = _parse_plan(run_dir, max_children)
+    except ValueError:
+        return out  # no parseable plan (common under StubBackend) — basic summary
+    out["children"] = [f"{epic_id}.{c['key']}" for c in plan]
+    if shared_branch:
+        lanes = _plan_lanes(plan)
+        out["lanes"] = lanes
+        for i, lane in enumerate(lanes, 1):
+            kind = "parallel" if len(lane) > 1 else "single"
+            logger.info("agentic-epic: dry-run lane %d (%s): %s", i, kind, lane)
+        logger.info(
+            "agentic-epic: dry-run — would create %s + 1 draft PR, %d lane(s)",
+            out["epic_branch"], len(lanes),
+        )
+    return out
+
+
 @flow(name="agentic_epic", flow_run_name="{epic_id}", log_prints=True)
 def agentic_epic(
     epic_id: str,
@@ -202,6 +265,8 @@ def agentic_epic(
     iter_cap: int = 2,
     max_children: int = 12,
     dry_run: bool = False,
+    shared_branch: bool = False,
+    base_branch: str = "main",
 ) -> dict[str, Any]:
     """Plan an epic from its goal, create stamped child beads, and fan them out.
 
@@ -213,6 +278,16 @@ def agentic_epic(
 
     The signature carries the dispatcher-required ``(issue_id-equivalent)``
     triple as ``(epic_id, rig, rig_path)`` — ``epic_id`` is the root.
+
+    **Shared-branch mode** (``shared_branch=True``, default OFF): instead of N
+    per-child PRs, the whole epic lands as one integration branch
+    ``epic/<epic-id>`` + one draft PR. The flow cuts the epic branch off
+    ``base_branch``, opens the draft PR, then fans the children out via
+    ``graph_run`` threading ``epic_branch`` / ``parent_epic_id`` to each child
+    run — so each child branches off the **current epic tip** (parallel where
+    independent, stacked along ``blocks`` chains) and is merged into the epic
+    branch on critic-pass. At the end the draft PR is flipped to ready. Default
+    OFF leaves the per-child-PR path exactly as before.
     """
     logger = get_run_logger()
     rig_path_p = Path(rig_path).expanduser().resolve()
@@ -278,14 +353,38 @@ def agentic_epic(
 
         # ── Phase 2: create the stamped child beads ────────────────────────
         if dry_run:
-            logger.info("agentic-epic: dry-run — skipping bead creation + dispatch")
-            return {"status": "dry-run", "epic_id": epic_id, "children": []}
+            return _dry_run_summary(epic_id, run_dir, max_children, shared_branch, logger)
 
         plan = _parse_plan(run_dir, max_children)
         child_ids = _create_children(epic_id, plan, rig_path_p, logger)
         logger.info("agentic-epic: created %d child bead(s): %s", len(child_ids), child_ids)
 
-        # ── Phase 3: fan out (each child runs software-dev-agentic) ─────────
+        # ── Phase 3a: shared-branch setup (one integration branch + draft PR) ──
+        epic_branch = ""
+        pr_info: dict[str, Any] | None = None
+        extra_kwargs: dict[str, Any] | None = None
+        if shared_branch:
+            epic_branch = sb.epic_branch_name(epic_id)
+            branch_info = sb.create_integration_branch(
+                rig_path_p, epic_id, base_branch=base_branch
+            )
+            pr_info = dict(
+                sb.open_draft_pr(
+                    rig_path_p,
+                    branch=epic_branch,
+                    base_branch=base_branch,
+                    title=f"[epic] {epic_id}",
+                    body=(goal or f"agentic-epic {epic_id}")
+                    + f"\n\nShared-integration-branch epic. Children: {child_ids}",
+                )
+            )
+            extra_kwargs = {"epic_branch": epic_branch, "parent_epic_id": epic_id}
+            logger.info(
+                "agentic-epic: shared-branch %s (created=%s) draft PR=%s",
+                epic_branch, branch_info.get("created"), pr_info.get("url") or "(none)",
+            )
+
+        # ── Phase 3b: fan out (each child runs software-dev-agentic) ─────────
         dispatch = graph_run(
             root_id=epic_id,
             rig=rig,
@@ -294,7 +393,17 @@ def agentic_epic(
             formula=_CHILD_FORMULA,
             iter_cap=iter_cap,
             dry_run=False,
+            extra_formula_kwargs=extra_kwargs,
         )
+
+        # ── Phase 3c: shared-branch finalize (mark the single PR ready) ──────
+        if shared_branch:
+            ready = sb.mark_pr_ready(rig_path_p, branch=epic_branch)
+            sb.cleanup_integration_worktree(rig_path_p, epic_id)
+            logger.info(
+                "agentic-epic: shared-branch finalize — PR ready=%s (%s)",
+                ready.get("ready"), ready.get("reason") or "ok",
+            )
 
         # The epic closes only when every discovered child has closed — that is
         # graph_run's contract. Mirror it: close the epic on a clean fan-out.
@@ -308,6 +417,9 @@ def agentic_epic(
             "epic_id": epic_id,
             "children": child_ids,
             "dispatch": dispatch,
+            "shared_branch": shared_branch,
+            "epic_branch": epic_branch or None,
+            "pr": pr_info,
         }
     except Exception as exc:
         _record_flow_outcome(run_dir, exc, epic_id, str(rig_path_p))

@@ -138,6 +138,7 @@ def _dispatch_nodes(
     dry_run: bool,
     max_issues: int | None,
     logger: Any,
+    extra_formula_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Topo-sort `nodes` by their blocks-subgraph and submit one task per node.
 
@@ -145,6 +146,11 @@ def _dispatch_nodes(
     …) the formula understands. We pass them through as kwargs only if
     the formula's signature accepts them, so a formula that doesn't care
     about iter caps doesn't get mystery kwargs.
+
+    `extra_formula_kwargs` is the same idea for non-iter knobs a specific
+    dispatcher wants threaded to every node (e.g. shared-branch mode passes
+    `epic_branch` / `parent_epic_id`). Like `iter_caps`, each key is forwarded
+    only to formulas whose signature accepts it.
     """
     ordered = topo_sort_blocks(nodes)
     if max_issues:
@@ -221,11 +227,15 @@ def _dispatch_nodes(
         except (TypeError, ValueError):
             accepted = set(_REQUIRED_FORMULA_PARAMS) | {"parent_bead", "dry_run"}
         base_caps = {k: v for k, v in iter_caps.items() if k in accepted}
+        extra_caps = {
+            k: v for k, v in (extra_formula_kwargs or {}).items() if k in accepted
+        }
         kwargs: dict[str, Any] = {
             "issue_id": node["id"],
             "rig": rig,
             "rig_path": rig_path,
             **base_caps,
+            **extra_caps,
         }
         if "parent_bead" in accepted and parent_bead is not None:
             kwargs["parent_bead"] = parent_bead
@@ -390,6 +400,7 @@ def graph_run(
     verify_iter_cap: int = 3,
     ralph_iter_cap: int = 3,
     dry_run: bool = False,
+    extra_formula_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fan out a bd sub-graph rooted at `root_id` as a Prefect DAG.
 
@@ -457,5 +468,6 @@ def graph_run(
         dry_run=dry_run,
         max_issues=max_issues,
         logger=logger,
+        extra_formula_kwargs=extra_formula_kwargs,
     )
     return {"root_id": root_id, **out}

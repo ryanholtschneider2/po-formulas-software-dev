@@ -412,3 +412,81 @@ def test_dispatch_logs_unavailable_and_skipped_branches(
     assert "soloco-sheriff unavailable" in joined
     assert "pr-sheriff dispatch skipped (prefect unreachable)" in joined
     assert "no PR sheriff dispatched for feat-4" in joined
+
+
+# ─────────────────── shared-branch epic mode ────────────────────────
+
+
+def test_shared_mode_passes_branch_directive_and_integrates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `epic_branch` set: the worker gets a non-empty branch_directive, the
+    flow integrates the child branch into the epic branch on pass (instead of
+    the PR sheriff), and skips per-child preview stamping."""
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    calls: list[dict] = []
+    closed: list[str] = []
+    monkeypatch.setattr(ag, "agent_step", _fake_agent_step(calls, ["pass"]))
+    _patch_common(monkeypatch, closed)
+
+    integrated: dict = {}
+    monkeypatch.setattr(
+        ag.shared_branch, "ensure_integration_worktree",
+        lambda rp, eid: tmp_path / "intwt",
+    )
+    monkeypatch.setattr(
+        ag.shared_branch, "integrate_child",
+        lambda rp, eid, cid, **k: integrated.update({"eid": eid, "cid": cid})
+        or {"merged": True, "conflict": False, "child_branch": "agentic-c1"},
+    )
+    # PR sheriff and preview stamping must NOT fire in shared mode.
+    monkeypatch.setattr(
+        ag, "_dispatch_pr_sheriff",
+        lambda *a, **k: pytest.fail("shared mode must not dispatch PR sheriff"),
+    )
+    monkeypatch.setattr(
+        ag, "_stamp_preview_url",
+        lambda *a, **k: pytest.fail("shared mode must not stamp a per-child preview"),
+    )
+
+    result = ag.software_dev_agentic.fn(
+        issue_id="c1", rig="rig", rig_path=str(rig), iter_cap=1,
+        epic_branch="epic/e1", parent_epic_id="e1",
+    )
+
+    worker_calls = [c for c in calls if c.get("step") == "agentic"]
+    directive = worker_calls[0]["ctx"]["branch_directive"]
+    assert "epic/e1" in directive and "DO NOT open a PR" in directive
+    assert integrated == {"eid": "e1", "cid": "c1"}
+    assert result["integration"]["merged"] is True
+    assert closed == ["c1"]
+
+
+def test_default_mode_directive_empty_and_sheriff_fires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default (no epic_branch): empty branch_directive, no integrate, PR
+    sheriff fires — the existing per-child-PR path, unchanged."""
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    calls: list[dict] = []
+    closed: list[str] = []
+    monkeypatch.setattr(ag, "agent_step", _fake_agent_step(calls, ["pass"]))
+    _patch_common(monkeypatch, closed)
+    monkeypatch.setattr(
+        ag.shared_branch, "integrate_child",
+        lambda *a, **k: pytest.fail("default mode must not integrate"),
+    )
+    monkeypatch.setattr(ag, "_stamp_preview_url", lambda *a, **k: "")
+    sheriff: list[str] = []
+    monkeypatch.setattr(ag, "_dispatch_pr_sheriff", lambda rp, iid, lg: sheriff.append(iid))
+
+    result = ag.software_dev_agentic.fn(
+        issue_id="c2", rig="rig", rig_path=str(rig), iter_cap=1,
+    )
+
+    worker_calls = [c for c in calls if c.get("step") == "agentic"]
+    assert worker_calls[0]["ctx"]["branch_directive"] == ""
+    assert sheriff == ["c2"]
+    assert result["integration"] is None
