@@ -458,20 +458,35 @@ def test_agentic_epic_shared_branch_no_pr_when_nothing_integrated(
     assert "no children integrated" in result["pr"]["reason"]
 
 
-def test_agentic_epic_acceptance_fail_opens_draft(tmp_path, monkeypatch):
-    """Epic acceptance-critic FAIL → the single PR is opened as a DRAFT (so the
-    sheriff can't auto-merge a gapped epic), with the verdict surfaced."""
+def test_agentic_epic_acceptance_fail_runs_fixer_then_opens_ready_pr(
+    tmp_path, monkeypatch
+):
+    """Epic acceptance-critic FAIL → file one software-dev-agentic fixer child,
+    run it on the shared branch, then re-run acceptance before opening the PR."""
     epic_id = "rig-epic-accept-fail"
     run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
-    plan = {"children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]}
+    plan = {
+        "children": [
+            {"key": "1", "title": "a", "description": "d", "depends_on": []}
+        ]
+    }
     _patch_common(monkeypatch, run_dir, plan)
 
-    # Planning steps pass; the acceptance critic FAILS.
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "critique-epic-acceptance.md").write_text("UNMET: wire the UI")
+    acceptance_calls = {"n": 0}
+
+    # Planning steps pass; the first acceptance critic FAILS, the fixer lands,
+    # and the second acceptance critic PASSES.
     def fake_agent_step(*, agent_dir, step, **kwargs):
         if step == "epic-plan":
             run_dir.mkdir(parents=True, exist_ok=True)
             (run_dir / ae._PLAN_FILE).write_text(json.dumps(plan))
-        v = "fail" if step == "epic-acceptance-critic" else "pass"
+        if step == "epic-acceptance-critic":
+            acceptance_calls["n"] += 1
+            v = "fail" if acceptance_calls["n"] == 1 else "pass"
+        else:
+            v = "pass"
         return type("R", (), {"verdict": v, "closed_by": "agent"})()
 
     monkeypatch.setattr(ae, "agent_step", fake_agent_step)
@@ -486,14 +501,127 @@ def test_agentic_epic_acceptance_fail_opens_draft(tmp_path, monkeypatch):
         lambda rp, **k: pr_calls.update(k) or {"opened": True, "url": "https://x/pull/5", "reason": ""},
     )
     monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
-    monkeypatch.setattr(ae, "graph_run", lambda **k: {"status": "ok", "results": {}})
+    graph_calls: list[dict] = []
+
+    def fake_graph_run(**k):
+        graph_calls.append(k)
+        if k.get("root_as_node"):
+            fid = k["root_id"]
+            return {
+                "status": "completed",
+                "results": {fid: {"integration": {"merged": True}}},
+            }
+        return {
+            "status": "ok",
+            "results": {"child-1": {"integration": {"merged": True}}},
+        }
+
+    monkeypatch.setattr(ae, "graph_run", fake_graph_run)
+    created: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        ae,
+        "create_child_bead",
+        lambda *, parent_id, child_id, **k: (
+            created.append((parent_id, child_id)) or child_id
+        ),
+    )
+    stamped: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        ae, "_bd_set_metadata", lambda i, k, v, rp: stamped.append((i, k, v))
+    )
+    closed: list[str] = []
+    monkeypatch.setattr(ae, "close_issue", lambda i, **k: closed.append(i))
 
     result = ae.agentic_epic.fn(
         epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True
     )
-    assert pr_calls["draft"] is True            # FAIL → draft
-    assert "FAIL" in pr_calls["body"]           # verdict surfaced in the PR body
+    assert len(graph_calls) == 2
+    assert graph_calls[1]["root_id"] == f"{epic_id}.acceptance-fix"
+    assert graph_calls[1]["root_as_node"] is True
+    assert graph_calls[1]["extra_formula_kwargs"] == {
+        "epic_branch": f"epic/{epic_id}",
+        "parent_epic_id": epic_id,
+    }
+    assert created[-1] == (epic_id, f"{epic_id}.acceptance-fix")
+    assert (
+        f"{epic_id}.acceptance-fix",
+        "po.formula",
+        "software-dev-agentic",
+    ) in stamped
+    assert pr_calls["draft"] is False
+    assert "PASS" in pr_calls["body"]
+    assert result["pr"]["acceptance_verdict"] == "pass"
+    assert result["acceptance_fix_id"] == f"{epic_id}.acceptance-fix"
+    assert closed == [epic_id]
+
+
+def test_agentic_epic_second_acceptance_fail_opens_draft_and_leaves_epic_open(
+    tmp_path, monkeypatch
+):
+    """If the automatic fixer still fails acceptance, open a draft PR and keep
+    the epic open instead of marking it complete."""
+    epic_id = "rig-epic-accept-fail-twice"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {
+        "children": [
+            {"key": "1", "title": "a", "description": "d", "depends_on": []}
+        ]
+    }
+    _patch_common(monkeypatch, run_dir, plan)
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "critique-epic-acceptance.md").write_text("UNMET: still missing")
+
+    def fake_agent_step(*, step, **kwargs):
+        if step == "epic-plan":
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / ae._PLAN_FILE).write_text(json.dumps(plan))
+        v = "fail" if step == "epic-acceptance-critic" else "pass"
+        return type("R", (), {"verdict": v, "closed_by": "agent"})()
+
+    monkeypatch.setattr(ae, "agent_step", fake_agent_step)
+    monkeypatch.setattr(
+        ae.sb,
+        "create_integration_branch",
+        lambda rp, eid, **k: {
+            "branch": f"epic/{eid}",
+            "created": True,
+            "pushed": True,
+            "remote": True,
+        },
+    )
+    monkeypatch.setattr(ae.sb, "commits_ahead", lambda rp, base, branch: 3)
+    pr_calls: dict = {}
+    monkeypatch.setattr(
+        ae.sb,
+        "open_draft_pr",
+        lambda rp, **k: pr_calls.update(k)
+        or {"opened": True, "url": "https://x/pull/6", "reason": ""},
+    )
+    monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
+
+    def fake_graph_run(**k):
+        if k.get("root_as_node"):
+            fid = k["root_id"]
+            return {
+                "status": "completed",
+                "results": {fid: {"integration": {"merged": True}}},
+            }
+        return {"status": "ok", "results": {}}
+
+    monkeypatch.setattr(ae, "graph_run", fake_graph_run)
+    closed: list[str] = []
+    monkeypatch.setattr(ae, "close_issue", lambda i, **k: closed.append(i))
+
+    result = ae.agentic_epic.fn(
+        epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True
+    )
+
+    assert pr_calls["draft"] is True
+    assert "FAIL" in pr_calls["body"]
+    assert result["status"] == "incomplete"
     assert result["pr"]["acceptance_verdict"] == "fail"
+    assert closed == []
 
 
 def test_integration_summary_marks_landed_and_dropped():
@@ -763,6 +891,8 @@ def test_plan_critic_loop_iterates_on_bad_plan(tmp_path, monkeypatch):
                 "FAIL: child 1 is too vague" if verdict == "fail" else "PASS"
             )
             return type("R", (), {"verdict": verdict, "closed_by": "agent"})()
+        if step == "epic-acceptance-critic":
+            return type("R", (), {"verdict": "pass", "closed_by": "agent"})()
         return type("R", (), {"verdict": "complete", "closed_by": "agent"})()
 
     _patch_common(monkeypatch, run_dir, good_plan)
@@ -782,6 +912,7 @@ def test_plan_critic_loop_iterates_on_bad_plan(tmp_path, monkeypatch):
         "open_draft_pr",
         lambda rp, **k: {"opened": True, "url": "https://x/pull/2", "reason": ""},
     )
+    monkeypatch.setattr(ae.sb, "commits_ahead", lambda rp, base, branch: 1)
     monkeypatch.setattr(
         ae.sb, "mark_pr_ready", lambda rp, **k: {"ready": True, "reason": ""}
     )
