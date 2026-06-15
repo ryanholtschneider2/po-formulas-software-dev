@@ -33,7 +33,7 @@ import fcntl
 import logging
 import os
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -373,6 +373,7 @@ def integrate_child(
     *,
     integration_worktree: Path | str | None = None,
     push: bool = True,
+    on_conflict: Callable[[Path, list[str]], bool] | None = None,
 ) -> dict[str, object]:
     """Merge a passed child's branch into ``epic/<epic-id>`` (serialized).
 
@@ -385,10 +386,19 @@ def integrate_child(
     Holds the per-epic integration lock for the whole merge so parallel lanes
     don't race the ref.
 
-    On conflict the merge is aborted (``git merge --abort``) and the epic branch
-    is left clean; the caller decides whether to fall back to a fix-merge.
+    On conflict, if ``on_conflict`` is given the merge is LEFT in place (not
+    aborted) and the callback is invoked **under the lock** with
+    ``(integration_worktree, conflicted_files)`` — the ZFC seam where the
+    resolution *judgment* (an agent) plugs into the git *transport* here. The
+    callback is expected to resolve the conflicts and ``git commit`` the merge in
+    that worktree; if it does (no ``MERGE_HEAD``, no unmerged paths remain), the
+    result is pushed and ``{merged: True, resolved: True}`` is returned — the
+    child's work is NOT dropped. If there is no callback, it returns falsy, it
+    raises, or markers remain, the merge is aborted and ``{conflict: True}`` is
+    returned, leaving the epic branch clean.
 
-    Returns ``{merged, conflict, child_branch, pushed, reason}``.
+    Returns ``{merged, conflict, child_branch, pushed, reason}`` (+ ``resolved``
+    when a conflict was repaired by the callback).
     """
     repo = Path(rig_path).expanduser().resolve()
     if integration_worktree is None:
@@ -413,20 +423,64 @@ def integrate_child(
         _git(["checkout", epic_branch], cwd=wt, check=False)
         merge = _git(["merge", "--no-edit", child_branch], cwd=wt, check=False)
         if merge.returncode != 0:
-            _git(["merge", "--abort"], cwd=wt, check=False)
             reason = (merge.stdout + merge.stderr).strip()[:300]
-            logger.warning(
-                "shared-branch: merge of %s into %s conflicted; aborted (%s)",
+            resolved = False
+            if on_conflict is not None:
+                conflicted = [
+                    f
+                    for f in _git(
+                        ["diff", "--name-only", "--diff-filter=U"], cwd=wt, check=False
+                    ).stdout.splitlines()
+                    if f.strip()
+                ]
+                try:
+                    callback_ok = bool(on_conflict(wt, conflicted))
+                except Exception as exc:  # noqa: BLE001 — never crash integration
+                    logger.warning("shared-branch: on_conflict resolver raised: %s", exc)
+                    callback_ok = False
+                if callback_ok:
+                    # Resolved only if the callback actually committed the merge:
+                    # no MERGE_HEAD left and no unmerged paths remain.
+                    merge_head = _git(
+                        ["rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=wt, check=False
+                    )
+                    unmerged = _git(
+                        ["diff", "--name-only", "--diff-filter=U"], cwd=wt, check=False
+                    ).stdout.strip()
+                    resolved = merge_head.returncode != 0 and not unmerged
+            if not resolved:
+                _git(["merge", "--abort"], cwd=wt, check=False)
+                logger.warning(
+                    "shared-branch: merge of %s into %s conflicted; aborted (%s)",
+                    child_branch,
+                    epic_branch,
+                    reason,
+                )
+                return {
+                    "merged": False,
+                    "conflict": True,
+                    "child_branch": child_branch,
+                    "pushed": False,
+                    "reason": f"merge conflict: {reason}",
+                }
+            logger.info(
+                "shared-branch: conflict resolved + integrated %s into %s",
                 child_branch,
                 epic_branch,
-                reason,
             )
+            pushed = False
+            if push and _has_remote(wt):
+                pushed = (
+                    _git(["push", "origin", epic_branch], cwd=wt, check=False).returncode
+                    == 0
+                )
             return {
-                "merged": False,
-                "conflict": True,
+                "merged": True,
+                "conflict": False,
+                "resolved": True,
                 "child_branch": child_branch,
-                "pushed": False,
-                "reason": f"merge conflict: {reason}",
+                "pushed": pushed,
+                "reason": "",
             }
         logger.info("shared-branch: integrated %s into %s", child_branch, epic_branch)
 

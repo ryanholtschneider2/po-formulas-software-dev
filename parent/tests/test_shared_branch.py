@@ -253,6 +253,60 @@ def test_integrate_child_conflict_aborts(monkeypatch, tmp_path):
     assert not fake.ran("push", "origin", "epic/rig-e1")
 
 
+def test_integrate_child_conflict_resolved_by_callback(monkeypatch, tmp_path):
+    """on_conflict resolver commits the merge → child is KEPT, not dropped."""
+    fake = FakeRun(
+        {
+            "rev-parse --verify --quiet refs/heads/agentic-": (0, "abc\n", ""),
+            "remote": (0, "origin\n", ""),
+            "merge --no-edit": (1, "CONFLICT in IdeaCard.tsx", ""),
+            "diff --name-only --diff-filter=U": (0, "", ""),  # post-resolve: none unmerged
+            "rev-parse -q --verify MERGE_HEAD": (1, "", ""),  # committed → no MERGE_HEAD
+        }
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    called: dict = {}
+
+    def resolver(wt, files):
+        called["wt"] = wt
+        return True  # pretend the agent resolved + committed
+
+    info = sb.integrate_child(
+        tmp_path, "rig-e1", "rig-e1.2",
+        integration_worktree=tmp_path / "wt", on_conflict=resolver,
+    )
+    assert info["merged"] is True
+    assert info["resolved"] is True
+    assert info["conflict"] is False
+    assert called["wt"] == tmp_path / "wt"
+    assert not fake.ran("merge", "--abort")          # NOT dropped
+    assert fake.ran("push", "origin", "epic/rig-e1")  # the resolved merge is pushed
+
+
+def test_integrate_child_conflict_callback_fails_aborts(monkeypatch, tmp_path):
+    """on_conflict that can't resolve → abort, child dropped, epic branch clean."""
+    fake = FakeRun(
+        {
+            "rev-parse --verify --quiet refs/heads/agentic-": (0, "abc\n", ""),
+            "remote": (0, "origin\n", ""),
+            "merge --no-edit": (1, "CONFLICT in IdeaCard.tsx", ""),
+            "diff --name-only --diff-filter=U": (0, "IdeaCard.tsx\n", ""),
+        }
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    info = sb.integrate_child(
+        tmp_path, "rig-e1", "rig-e1.2",
+        integration_worktree=tmp_path / "wt",
+        on_conflict=lambda wt, files: False,
+    )
+    assert info["merged"] is False
+    assert info["conflict"] is True
+    assert fake.ran("merge", "--abort")
+    assert not fake.ran("push", "origin", "epic/rig-e1")
+
+
 def test_integrate_child_missing_branch(monkeypatch, tmp_path):
     fake = FakeRun({"rev-parse --verify --quiet refs/heads/agentic-": (1, "", "")})
     monkeypatch.setattr(subprocess, "run", fake)
