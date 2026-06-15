@@ -18,12 +18,12 @@ lives in core's `agent_step`.
 The bead graph produced by one run::
 
     <seed>                       (the user's issue)
-    ├── <seed>.triage.iter1      (closed by triager agent)
-    ├── <seed>.plan.iter1        (closed by builder agent in plan mode)
-    ├── <seed>.build.iter1       (closed by builder)
-    ├── <seed>.lint.iter1        "clean" or "failed"
-    ├── <seed>.build.iter2       (only if iter1 failed lint)
-    └── <seed>.lint.iter2        "clean" → success, "failed" → raise
+    ├── <seed>-triage-iter1      (closed by triager agent)
+    ├── <seed>-plan-iter1        (closed by builder agent in plan mode)
+    ├── <seed>-build-iter1       (closed by builder)
+    ├── <seed>-lint-iter1        "clean" or "failed"
+    ├── <seed>-build-iter2       (only if iter1 failed lint)
+    └── <seed>-lint-iter2        "clean" → success, "failed" → raise
 
 The agents reuse `agents/<role>/{prompt,task}.md` from the same pack —
 identity prompt + task spec stay shared with `software_dev_full`.
