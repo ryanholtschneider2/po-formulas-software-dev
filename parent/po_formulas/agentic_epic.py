@@ -352,7 +352,9 @@ def _integration_summary(dispatch: dict[str, Any]) -> str:
     """
     results = (dispatch or {}).get("results") or {}
     if not results:
-        return "(no per-child results reported)"
+        base = "(no per-child results reported)"
+    else:
+        base = ""
     lines: list[str] = []
     for cid, res in sorted(results.items()):
         if isinstance(res, dict):
@@ -369,7 +371,118 @@ def _integration_summary(dispatch: dict[str, Any]) -> str:
                 lines.append(f"- `{cid}`: DROPPED — not integrated ({str(detail)[:140]})")
         else:
             lines.append(f"- `{cid}`: FAILED — {str(res)[:140]}")
+    acceptance_fix = (dispatch or {}).get("acceptance_fix") or {}
+    if isinstance(acceptance_fix, dict):
+        fix_id = acceptance_fix.get("id")
+        fix_dispatch = acceptance_fix.get("dispatch") or {}
+        fix_results = fix_dispatch.get("results") if isinstance(fix_dispatch, dict) else {}
+        if fix_id and isinstance(fix_results, dict):
+            fix_res = fix_results.get(fix_id)
+            if isinstance(fix_res, dict) and (fix_res.get("integration") or {}).get("merged"):
+                lines.append(f"- `{fix_id}`: LANDED (acceptance-fix child)")
+            elif fix_res is not None:
+                lines.append(f"- `{fix_id}`: DROPPED — acceptance-fix did not land")
+            else:
+                lines.append(f"- `{fix_id}`: DROPPED — acceptance-fix result missing")
+    if base and not lines:
+        return base
     return "\n".join(lines)
+
+
+def _acceptance_critique(run_dir: Path) -> str:
+    """Read the latest epic acceptance critique for a fixer bead body."""
+    critique = _read_text(run_dir / "critique-epic-acceptance.md").strip()
+    return critique or "(acceptance critic did not write a critique file)"
+
+
+def _create_acceptance_fix_bead(
+    *,
+    epic_id: str,
+    rig_path: Path,
+    run_dir: Path,
+    epic_branch: str,
+    base_branch: str,
+    dispatch: dict[str, Any],
+    logger: Any,
+) -> str:
+    """Create the follow-up child that repairs a failed epic acceptance gate."""
+    requested_id = f"{epic_id}.acceptance-fix"
+    description = (
+        f"Fix the remaining acceptance gaps for epic `{epic_id}`.\n\n"
+        "The shared-branch epic acceptance critic failed after the planned "
+        "children ran. Work directly against the existing integration branch "
+        f"`{epic_branch}` and make the smallest complete fix needed for the "
+        "whole epic to satisfy its PRD.\n\n"
+        "## Inputs\n\n"
+        f"- PRD: `{run_dir / _PRD_FILE}`\n"
+        f"- Acceptance critique: `{run_dir / 'critique-epic-acceptance.md'}`\n"
+        f"- Base branch: `{base_branch}`\n"
+        f"- Integration branch: `{epic_branch}`\n\n"
+        "## Current child integration state\n\n"
+        f"{_integration_summary(dispatch)}\n\n"
+        "## Critic gaps to fix\n\n"
+        f"{_acceptance_critique(run_dir)}\n\n"
+        "## Acceptance criteria\n\n"
+        "- Every UNMET item in the epic acceptance critique is addressed by "
+        "integrated code on the epic branch.\n"
+        "- Any child work that was dropped or failed but is required by the PRD "
+        "is implemented or recovered.\n"
+        "- Relevant tests, lint, or smoke checks are run and recorded in the "
+        "worker artifacts.\n"
+        "- Do not open a child PR; the agentic-epic flow owns the single epic PR."
+    )
+    actual_id = create_child_bead(
+        parent_id=epic_id,
+        child_id=requested_id,
+        title=f"Fix acceptance gaps for {epic_id}",
+        description=description,
+        issue_type="task",
+        rig_path=rig_path,
+        priority=1,
+    )
+    _bd_set_metadata(actual_id, "po.formula", _CHILD_FORMULA, rig_path)
+    _bd_set_metadata(actual_id, "agentic_epic.acceptance_fix_for", epic_id, rig_path)
+    logger.warning(
+        "agentic-epic: acceptance failed; filed fixer child %s for %s",
+        actual_id,
+        epic_id,
+    )
+    return actual_id
+
+
+def _run_epic_acceptance_critic(
+    *,
+    epic_id: str,
+    rig_path: Path,
+    run_dir: Path,
+    pack_path: Path,
+    epic_branch: str,
+    base_branch: str,
+    dispatch: dict[str, Any],
+    iter_n: int,
+    dry_run: bool,
+) -> str:
+    """Return pass/fail for the assembled epic branch."""
+    if dry_run:
+        return "pass"
+    accept = agent_step(
+        agent_dir=_AGENTS_DIR / "agentic-epic-acceptance-critic",
+        task=_AGENTS_DIR / "agentic-epic-acceptance-critic" / "task.md",
+        seed_id=epic_id,
+        rig_path=str(rig_path),
+        run_dir=run_dir,
+        step="epic-acceptance-critic",
+        iter_n=iter_n,
+        ctx={
+            "pack_path": str(pack_path),
+            "prd_file": _PRD_FILE,
+            "epic_branch": epic_branch,
+            "base_branch": base_branch,
+            "integration_summary": _integration_summary(dispatch),
+        },
+        verdict_keywords=("pass", "fail"),
+    )
+    return accept.verdict
 
 
 # Epic-process beads (the PRD / plan / plan-critic agent_step iter beads) are
@@ -621,6 +734,8 @@ def agentic_epic(
         # Only when children actually integrated commits (else there is nothing
         # to review). Opened ready-for-review (not draft) so the sheriff acts on
         # a complete epic.
+        acceptance_fix_id: str | None = None
+        acceptance_fix_dispatch: dict[str, Any] | None = None
         if shared_branch:
             ahead = sb.commits_ahead(rig_path_p, base_branch, epic_branch)
             accept_verdict = "n/a"
@@ -629,30 +744,61 @@ def agentic_epic(
                 # the assembled diff. Per-child critics judged slices in isolation;
                 # this catches dropped children, unmet acceptance criteria, and hard
                 # PRD constraints (a required skill, an autonomy rule) the build
-                # ignored. FAIL → open the PR as a DRAFT so the sheriff can't
-                # auto-merge a gapped epic; the gap list lives in
-                # critique-epic-acceptance.md and the PR body.
-                if dry_run:
-                    accept_verdict = "pass"
-                else:
-                    accept = agent_step(
-                        agent_dir=_AGENTS_DIR / "agentic-epic-acceptance-critic",
-                        task=_AGENTS_DIR / "agentic-epic-acceptance-critic" / "task.md",
-                        seed_id=epic_id,
-                        rig_path=str(rig_path_p),
+                # ignored. FAIL → file and run one software-dev-agentic fixer
+                # child against the shared branch, then re-run acceptance. A
+                # second FAIL opens a DRAFT and leaves the epic open.
+                accept_verdict = _run_epic_acceptance_critic(
+                    epic_id=epic_id,
+                    rig_path=rig_path_p,
+                    run_dir=run_dir,
+                    pack_path=pack_path_p,
+                    epic_branch=epic_branch,
+                    base_branch=base_branch,
+                    dispatch=dispatch,
+                    iter_n=1,
+                    dry_run=dry_run,
+                )
+                if accept_verdict != "pass" and not dry_run:
+                    acceptance_fix_id = _create_acceptance_fix_bead(
+                        epic_id=epic_id,
+                        rig_path=rig_path_p,
                         run_dir=run_dir,
-                        step="epic-acceptance-critic",
-                        iter_n=1,
-                        ctx={
-                            "pack_path": str(pack_path_p),
-                            "prd_file": _PRD_FILE,
-                            "epic_branch": epic_branch,
-                            "base_branch": base_branch,
-                            "integration_summary": _integration_summary(dispatch),
-                        },
-                        verdict_keywords=("pass", "fail"),
+                        epic_branch=epic_branch,
+                        base_branch=base_branch,
+                        dispatch=dispatch,
+                        logger=logger,
                     )
-                    accept_verdict = accept.verdict
+                    acceptance_fix_dispatch = graph_run(
+                        root_id=acceptance_fix_id,
+                        rig=rig,
+                        rig_path=str(rig_path_p),
+                        traverse="parent-child,blocks",
+                        formula=_CHILD_FORMULA,
+                        iter_cap=iter_cap,
+                        dry_run=False,
+                        root_as_node=True,
+                        extra_formula_kwargs=extra_kwargs,
+                    )
+                    dispatch = {
+                        **dispatch,
+                        "acceptance_fix": {
+                            "id": acceptance_fix_id,
+                            "dispatch": acceptance_fix_dispatch,
+                        },
+                    }
+                    ahead = sb.commits_ahead(rig_path_p, base_branch, epic_branch)
+                    if ahead > 0:
+                        accept_verdict = _run_epic_acceptance_critic(
+                            epic_id=epic_id,
+                            rig_path=rig_path_p,
+                            run_dir=run_dir,
+                            pack_path=pack_path_p,
+                            epic_branch=epic_branch,
+                            base_branch=base_branch,
+                            dispatch=dispatch,
+                            iter_n=2,
+                            dry_run=False,
+                        )
                 draft = accept_verdict != "pass"
                 gap_note = (
                     ""
@@ -677,6 +823,8 @@ def agentic_epic(
                     )
                 )
                 pr_info["acceptance_verdict"] = accept_verdict
+                if acceptance_fix_id:
+                    pr_info["acceptance_fix_id"] = acceptance_fix_id
             else:
                 pr_info = {
                     "opened": False,
@@ -692,21 +840,36 @@ def agentic_epic(
                 ahead,
             )
 
-        # The epic closes only when every discovered child has closed — that is
-        # graph_run's contract. Mirror it: close the epic on a clean fan-out.
-        close_issue(
-            epic_id,
-            notes=f"po agentic-epic complete: {len(child_ids)} child(ren) dispatched",
-            rig_path=rig_path_p,
+        # Legacy fan-out closes on graph completion. Shared-branch epics close
+        # only when final assembled acceptance passes; otherwise the epic stays
+        # open with the fixer/draft PR artifacts attached for follow-up.
+        close_epic = not shared_branch or (
+            bool(pr_info and pr_info.get("opened"))
+            and pr_info.get("acceptance_verdict") == "pass"
         )
+        if close_epic:
+            close_issue(
+                epic_id,
+                notes=f"po agentic-epic complete: {len(child_ids)} child(ren) dispatched",
+                rig_path=rig_path_p,
+            )
+        else:
+            logger.warning(
+                "agentic-epic: leaving %s open (shared_branch=%s, pr=%s)",
+                epic_id,
+                shared_branch,
+                pr_info,
+            )
         return {
-            "status": "completed",
+            "status": "completed" if close_epic else "incomplete",
             "epic_id": epic_id,
             "children": child_ids,
             "dispatch": dispatch,
             "shared_branch": shared_branch,
             "epic_branch": epic_branch or None,
             "pr": pr_info,
+            "acceptance_fix_id": acceptance_fix_id,
+            "acceptance_fix_dispatch": acceptance_fix_dispatch,
         }
     except Exception as exc:
         _record_flow_outcome(run_dir, exc, epic_id, str(rig_path_p))
