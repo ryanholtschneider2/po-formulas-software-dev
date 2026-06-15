@@ -387,16 +387,46 @@ def software_dev_agentic(
         if shared_mode:
             if not dry_run:
                 epic_for_wt = parent_epic_id or parent_bead or issue_id
+
+                def _resolve_conflict(wt: Path, files: list[str]) -> bool:
+                    """Run the conflict-resolver agent in the mid-merge worktree.
+
+                    The child's work passed its critic, so a collision must be
+                    *resolved* (both-win), not dropped. The agent edits out the
+                    markers + commits; integrate_child verifies the commit landed.
+                    """
+                    res = agent_step(
+                        agent_dir=_AGENTS_DIR / "agentic-conflict-resolver",
+                        task=_AGENTS_DIR / "agentic-conflict-resolver" / "task.md",
+                        seed_id=issue_id,
+                        rig_path=str(rig_path_p),
+                        run_dir=run_dir,
+                        step="conflict-resolver",
+                        iter_n=1,
+                        ctx={
+                            "worktree": str(wt),
+                            "conflicted_files": "\n".join(files) or "(none reported)",
+                            "child_branch": shared_branch.child_branch_name(issue_id),
+                            "epic_branch": epic_branch,
+                        },
+                        verdict_keywords=("resolved", "failed"),
+                    )
+                    return res.verdict == "resolved"
+
                 integration = shared_branch.integrate_child(
-                    rig_path_p, epic_for_wt, issue_id
+                    rig_path_p, epic_for_wt, issue_id, on_conflict=_resolve_conflict
                 )
                 if integration.get("conflict"):
-                    # A dirty integration is rare (coupled children are
-                    # blocks-ordered) — surface it but don't fail the child run;
-                    # the epic finalize / a fix-merge child resolves it.
+                    # Resolver couldn't fix it (or failed) — epic acceptance critic
+                    # will flag the dropped child as a PRD gap (draft PR).
                     logger.warning(
-                        "agentic: shared-branch integrate of %s conflicted: %s",
+                        "agentic: shared-branch integrate of %s conflicted (unresolved): %s",
                         issue_id, integration.get("reason"),
+                    )
+                elif integration.get("resolved"):
+                    logger.info(
+                        "agentic: integrated %s into %s (merge conflict auto-resolved)",
+                        issue_id, epic_branch,
                     )
                 else:
                     logger.info("agentic: integrated %s into %s", issue_id, epic_branch)
