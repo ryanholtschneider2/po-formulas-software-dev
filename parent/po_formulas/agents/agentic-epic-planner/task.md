@@ -22,12 +22,9 @@ Break the goal into **2–{{max_children}}** child issues. Each child must be on
 
 # 3.5 Capture coupling (this is what keeps the parallel lanes conflict-safe)
 
-The whole epic lands on ONE shared integration branch. Children that edit the **same files** will collide if they run in parallel off the same tip. So for every child, list the concrete files it `touches` (drawn from the PRD's surfaces section + your own exploration). The flow reads these to:
+The whole epic lands on ONE shared integration branch, and **ordering is YOUR job** — the flow does not infer it. Children that edit the **same files** will collide if they run in parallel off the same tip, so **you must sequence them with a `depends_on`** (the later one then resumes from the earlier one's merged code). Children with disjoint files and no real output dependency you leave **unchained** so they fan out in parallel.
 
-- **Serialize coupled children** — any two children that share a file are stacked via a `blocks` edge so they never run concurrently (the second branches off the first's integrated tip).
-- **Parallelize independent children** — children with disjoint `touches` are left unchained and fan out in parallel.
-
-So the rule is: **`blocks` edges (whether you declare them in `depends_on` or the flow derives them from `touches`) appear only between children that genuinely couple — same files or a real output dependency. Do NOT serialize the whole epic.** Declare a `depends_on` when a child needs another's output even if the files differ; otherwise let `touches` express coupling and leave `depends_on` empty.
+So the rule is: **declare a `depends_on` between any two children that edit the same file OR where one needs another's output. Leave everything else parallel. Do NOT serialize the whole epic.** This is the most important judgment you make: a missing dep between two same-file children is exactly what causes an integration merge conflict downstream, and the fix is the dep — there is no deterministic auto-coupling and no auto-conflict-resolution to save you. For every child, also list the concrete files it `touches` (from the PRD surfaces + your exploration) — this is the evidence the plan-critic uses to check you sequenced the same-file children correctly.
 
 # 4. Write the plan
 
@@ -60,7 +57,7 @@ Rules the flow enforces (it will reject the plan otherwise):
 - every `title` and `description` is non-empty.
 - every `depends_on` entry references another child's `key` (no dangling/cyclic refs).
 - at most {{max_children}} children.
-- `touches` (optional but strongly recommended) is a list of real file paths; the flow uses it to auto-serialize coupled children, so omitting it on a child that shares files risks an integration conflict.
+- `touches` (strongly recommended) is a list of real file paths the child edits. It is NOT auto-wired into deps — it's the evidence the plan-critic uses to verify you added a `depends_on` between every pair of children that share a file. If two children share a file and you did not sequence them, the plan is wrong.
 - `formula` (optional) overrides the per-child formula — default `{{child_formula}}`. For a trivial child (e.g. a one-line link, a single registry entry) set `"formula": "minimal-task"` so it runs the lightweight pipeline instead of the full agentic critic loop.
 
 Each child is dispatched automatically once your plan passes the critic. Make each description good enough that a worker who sees only that bead can build it correctly.

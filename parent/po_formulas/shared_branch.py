@@ -2,9 +2,11 @@
 
 Pure git/gh mechanics — **no Prefect imports** — so every function is callable
 from a flow, a dry-run script, or a unit test with ``subprocess.run``
-monkeypatched. This is the *transport* leg of ZFC: branch / worktree / merge
-plumbing lives here as deterministic code; *which* children couple (and thus
-stack) stays the operator's `blocks`-edge wiring, read elsewhere.
+monkeypatched. This is the *transport* leg of ZFC: branch / worktree / lock
+plumbing lives here as deterministic code. The *judgment* — how to decompose and
+order the epic (the planning agent) and how to merge a child back, conflicts and
+all (the merge-back agent) — lives in agents, not here. This module never runs a
+``git merge``.
 
 Shared-branch mode lands a whole coupled epic as **one** integration branch
 ``epic/<epic-id>`` and **one** draft PR, instead of N per-child PRs:
@@ -16,12 +18,12 @@ Shared-branch mode lands a whole coupled epic as **one** integration branch
 - Each child runs in its own worktree branched off the **current** epic tip
   (``child_branch_name``); independent children fan out in parallel, ``blocks``-
   chained children stack because a dependent starts only after its prerequisite
-  has been integrated and so branches off the advanced tip.
-- ``integrate_child`` merges a passed child's branch into ``epic/<id>`` inside a
-  dedicated integration worktree, **serialized by a file lock** so parallel lanes
-  never race the shared ref. A conflict aborts cleanly and is reported (rare —
-  coupled children are ``blocks``-ordered and never run concurrently).
-- ``mark_pr_ready`` flips the draft PR to ready at finalize for human review.
+  has merged back and so branches off the advanced tip.
+- This module does **not** merge: integration is the child agent's job. After a
+  child passes its critic, the agentic flow runs a *merge-back agent* that merges
+  the child branch into ``epic/<id>`` in the integration worktree, holding the
+  ``integration_lock`` (the file lock exposed here) so parallel lanes serialize.
+- ``open_draft_pr`` / ``mark_pr_ready`` open + ready the single epic PR at finalize.
 
 The module never merges to ``main``; the single epic PR is the deliverable.
 """
@@ -33,7 +35,7 @@ import fcntl
 import logging
 import os
 import subprocess
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -342,7 +344,7 @@ def cleanup_integration_worktree(rig_path: Path | str, epic_id: str) -> None:
         _git(["worktree", "remove", "--force", str(wt)], cwd=repo, check=False)
 
 
-# ─── integrate-on-pass ───
+# ─── integration lock (serializes agent merge-backs) ───
 
 
 @contextlib.contextmanager
@@ -366,135 +368,9 @@ def _integration_lock(rig_path: Path | str, epic_id: str) -> Iterator[None]:
         os.close(fd)
 
 
-def integrate_child(
-    rig_path: Path | str,
-    epic_id: str,
-    child_id: str,
-    *,
-    integration_worktree: Path | str | None = None,
-    push: bool = True,
-    on_conflict: Callable[[Path, list[str]], bool] | None = None,
-) -> dict[str, object]:
-    """Merge a passed child's branch into ``epic/<epic-id>`` (serialized).
-
-    Runs inside the epic's integration worktree — a worktree checked out on the
-    epic branch — so the local epic ref advances and the next dependent child
-    branches off the integrated tip (the stacking guarantee). When
-    ``integration_worktree`` is ``None`` the worktree is ensured first (its own
-    locked create runs and releases *before* this merge takes the lock, so the
-    flock is never nested — a second fd on the same lock file would self-deadlock).
-    Holds the per-epic integration lock for the whole merge so parallel lanes
-    don't race the ref.
-
-    On conflict, if ``on_conflict`` is given the merge is LEFT in place (not
-    aborted) and the callback is invoked **under the lock** with
-    ``(integration_worktree, conflicted_files)`` — the ZFC seam where the
-    resolution *judgment* (an agent) plugs into the git *transport* here. The
-    callback is expected to resolve the conflicts and ``git commit`` the merge in
-    that worktree; if it does (no ``MERGE_HEAD``, no unmerged paths remain), the
-    result is pushed and ``{merged: True, resolved: True}`` is returned — the
-    child's work is NOT dropped. If there is no callback, it returns falsy, it
-    raises, or markers remain, the merge is aborted and ``{conflict: True}`` is
-    returned, leaving the epic branch clean.
-
-    Returns ``{merged, conflict, child_branch, pushed, reason}`` (+ ``resolved``
-    when a conflict was repaired by the callback).
-    """
-    repo = Path(rig_path).expanduser().resolve()
-    if integration_worktree is None:
-        wt = ensure_integration_worktree(repo, epic_id)
-    else:
-        wt = Path(integration_worktree).expanduser().resolve()
-    child_branch = child_branch_name(child_id)
-    epic_branch = epic_branch_name(epic_id)
-
-    with _integration_lock(repo, epic_id):
-        if not _local_branch_exists(repo, child_branch):
-            return {
-                "merged": False,
-                "conflict": False,
-                "child_branch": child_branch,
-                "pushed": False,
-                "reason": f"child branch {child_branch} not found",
-            }
-        # Defensive: the worktree should already be on the epic branch (that's
-        # how it was created), but a checkout makes integrate self-correcting if
-        # a prior run left it elsewhere. No-op when already on the branch.
-        _git(["checkout", epic_branch], cwd=wt, check=False)
-        merge = _git(["merge", "--no-edit", child_branch], cwd=wt, check=False)
-        if merge.returncode != 0:
-            reason = (merge.stdout + merge.stderr).strip()[:300]
-            resolved = False
-            if on_conflict is not None:
-                conflicted = [
-                    f
-                    for f in _git(
-                        ["diff", "--name-only", "--diff-filter=U"], cwd=wt, check=False
-                    ).stdout.splitlines()
-                    if f.strip()
-                ]
-                try:
-                    callback_ok = bool(on_conflict(wt, conflicted))
-                except Exception as exc:  # noqa: BLE001 — never crash integration
-                    logger.warning("shared-branch: on_conflict resolver raised: %s", exc)
-                    callback_ok = False
-                if callback_ok:
-                    # Resolved only if the callback actually committed the merge:
-                    # no MERGE_HEAD left and no unmerged paths remain.
-                    merge_head = _git(
-                        ["rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=wt, check=False
-                    )
-                    unmerged = _git(
-                        ["diff", "--name-only", "--diff-filter=U"], cwd=wt, check=False
-                    ).stdout.strip()
-                    resolved = merge_head.returncode != 0 and not unmerged
-            if not resolved:
-                _git(["merge", "--abort"], cwd=wt, check=False)
-                logger.warning(
-                    "shared-branch: merge of %s into %s conflicted; aborted (%s)",
-                    child_branch,
-                    epic_branch,
-                    reason,
-                )
-                return {
-                    "merged": False,
-                    "conflict": True,
-                    "child_branch": child_branch,
-                    "pushed": False,
-                    "reason": f"merge conflict: {reason}",
-                }
-            logger.info(
-                "shared-branch: conflict resolved + integrated %s into %s",
-                child_branch,
-                epic_branch,
-            )
-            pushed = False
-            if push and _has_remote(wt):
-                pushed = (
-                    _git(["push", "origin", epic_branch], cwd=wt, check=False).returncode
-                    == 0
-                )
-            return {
-                "merged": True,
-                "conflict": False,
-                "resolved": True,
-                "child_branch": child_branch,
-                "pushed": pushed,
-                "reason": "",
-            }
-        logger.info("shared-branch: integrated %s into %s", child_branch, epic_branch)
-
-        pushed = False
-        if push and _has_remote(wt):
-            p = _git(["push", "origin", epic_branch], cwd=wt, check=False)
-            pushed = p.returncode == 0
-        return {
-            "merged": True,
-            "conflict": False,
-            "child_branch": child_branch,
-            "pushed": pushed,
-            "reason": "",
-        }
+# Public alias: the child flow holds this per-epic lock while its merge-back
+# agent integrates into the shared epic branch, so parallel lanes serialize.
+integration_lock = _integration_lock
 
 
 # ─── per-child worker prompt override ───
@@ -530,10 +406,11 @@ def branch_directive(epic_branch: str, child_id: str) -> str:
         f"`{epic_branch}`, so branching off its tip stacks your change on theirs.)\n"
         f"2. Implement + test on `{child_branch}`. Commit early and often.\n"
         f"3. **Push your branch** (`git push -u origin {child_branch}` if a remote "
-        "exists) but **NEVER run `gh pr create` and NEVER merge to `main`** — the "
-        f"orchestrator merges your branch into `{epic_branch}` on critic-pass and "
-        "opens the single epic PR at the very end. If a step below says 'open a "
-        "PR', that step does NOT apply to you; just push and report the branch.\n"
+        "exists) but **NEVER run `gh pr create` and NEVER merge to `main`**. After "
+        "your critic passes, a separate merge-back step lands your branch onto "
+        f"`{epic_branch}` for you, and the epic PR is opened once at the very end. "
+        "If a step below says 'open a PR', that step does NOT apply to you; just "
+        "push and report the branch.\n"
         "4. When a step below says **Save the diff**, diff against the epic branch "
         f"you forked from, NOT `main` (else you capture prior children's work too):\n\n"
         "   ```bash\n"
@@ -548,8 +425,8 @@ __all__ = [
     "child_branch_name",
     "create_integration_branch",
     "commits_ahead",
+    "integration_lock",
     "open_draft_pr",
     "mark_pr_ready",
-    "integrate_child",
     "branch_directive",
 ]

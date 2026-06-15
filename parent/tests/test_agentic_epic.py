@@ -670,32 +670,7 @@ def test_parse_plan_rejects_non_list_touches(tmp_path):
         ae._parse_plan(tmp_path, max_children=12)
 
 
-# ── _coupling_map + _blocks_edges (blocks-only-between-coupled) ───────────────
-
-
-def test_coupling_map_pairs_only_shared_file_children():
-    plan = [
-        {"key": "1", "touches": ["a.py", "b.py"], "depends_on": []},
-        {"key": "2", "touches": ["b.py"], "depends_on": []},  # shares b.py with 1
-        {"key": "3", "touches": ["c.py"], "depends_on": []},  # disjoint
-        {"key": "4", "touches": [], "depends_on": []},  # no surfaces → couples w/ none
-    ]
-    assert ae._coupling_map(plan) == [("1", "2")]
-
-
-def test_blocks_edges_auto_serializes_coupled_but_unordered():
-    # 1 and 2 share a file but the planner left them independent → the flow must
-    # add a blocks edge so they stack; 3 is disjoint and stays parallel.
-    plan = [
-        {"key": "1", "touches": ["shared.py"], "depends_on": []},
-        {"key": "2", "touches": ["shared.py"], "depends_on": []},
-        {"key": "3", "touches": ["other.py"], "depends_on": []},
-    ]
-    edges = ae._blocks_edges(plan)
-    # higher key stacks after lower for a coupled pair.
-    assert ("2", "1") in edges
-    # no edge touches the independent child 3.
-    assert all("3" not in e for e in edges)
+# ── _blocks_edges (records the planner's declared deps) ──────────────────────
 
 
 def test_blocks_edges_no_edges_between_independent_children():

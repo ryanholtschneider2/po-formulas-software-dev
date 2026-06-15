@@ -11,19 +11,25 @@ The goal lives in the epic bead's own description (``po run agentic-epic
 1. **PRD** — one agent turns the goal into a short PRD (problem statement,
    acceptance criteria, the concrete surfaces/files the work touches), written to
    ``<run_dir>/prd.md``.
-2. **Decomposition** — a planner decomposes the goal into child issues, each
-   declaring the files it ``touches`` (the *coupling map*) plus any real
-   ``depends_on`` output edge.
+2. **Decomposition** — a planner decomposes the goal into child issues and
+   **owns the ordering**: it declares ``depends_on`` edges so that children which
+   edit the same surface are sequenced (the later one resumes from the earlier
+   one's merged code) and independent children are left parallel. ``touches`` is
+   recorded as informational context for the critic — nothing is inferred from it.
 3. **Plan-critic loop** — a critic audits the *decomposition* (coverage, sizing,
-   dependencies, and — critically — whether coupling is captured so the parallel
-   lanes are conflict-safe). Actor-critic until pass or ``plan_iter_cap``.
-4. **Dispatch** — the flow creates the child beads, wires ``blocks`` edges
-   **only between coupled children** (shared files → serialized; disjoint files →
-   left parallel), and fans them out via ``graph_run`` with ``shared_branch=True``:
-   one ``epic/<id>`` integration branch, one draft PR, parallel where independent,
-   stacked where coupled, integrate-on-pass, mark-ready at finalize.
+   and whether the planner's ``depends_on`` correctly sequences same-surface
+   children so the parallel lanes are conflict-safe). Actor-critic until pass or
+   ``plan_iter_cap``.
+4. **Dispatch** — the flow creates the child beads, records the planner's
+   ``depends_on`` as ``blocks`` edges (pure transport — no dep is inferred), and
+   fans them out via ``graph_run`` with ``shared_branch=True``: one ``epic/<id>``
+   integration branch, children parallel where independent and stacked where the
+   planner sequenced them, **each child merges its own branch back into the epic
+   branch after it passes its critic**, and the epic PR is opened at finalize.
 
-The flow never merges to ``main``: the single epic PR is the deliverable.
+The flow never merges to ``main``: the single epic PR is the deliverable. The
+flow itself runs no ``git merge`` — integration is the child agent's job (see
+``agentic.py``); the only judgment about ordering lives in the planning agent.
 
 ``plan.json`` contract (the planner writes this; the flow reads it)::
 
@@ -41,13 +47,14 @@ The flow never merges to ``main``: the single epic PR is the deliverable.
       ]
     }
 
-**Coupling → blocks edges.** Two children that share a file are *coupled*: they
-must not run in parallel off the same epic tip or they collide on integration.
-The flow derives the coupling map from each child's ``touches`` and auto-wires a
-``blocks`` edge for any coupled pair the planner left unordered — so coupled
-children always stack. Children with disjoint ``touches`` and no declared
-``depends_on`` get **no** edge and fan out in parallel. This is the
-"wire blocks only between coupled children" rule, enforced as transport.
+**Ordering is the planner's judgment, not the flow's.** Two children that edit
+the same surface must be sequenced (a ``depends_on``) so the second resumes from
+the first's merged code instead of colliding. That decision belongs to the
+planning agent — like a beads-epic / plan-epic skill — and the plan-critic checks
+it. The flow only *records* the planner's ``depends_on`` as ``blocks`` edges;
+it infers nothing from ``touches``. A merge conflict at integration therefore
+means the planner mis-ordered (it should have sequenced two same-surface
+children) — the fix is a dep, not deterministic conflict-resolution code.
 """
 
 from __future__ import annotations
@@ -181,74 +188,30 @@ def _parse_plan(run_dir: Path, max_children: int) -> list[dict[str, Any]]:
 
 
 def _norm_path(p: str) -> str:
-    """Normalize a ``touches`` path for coupling comparison: strip whitespace and
-    a leading ``./``, collapse backslashes. Cheap + deterministic so two children
-    naming the same file the same way compare equal."""
+    """Tidy a planner-declared ``touches`` path (strip whitespace + leading
+    ``./``, collapse backslashes) so the recorded surface list is clean for the
+    plan-critic to read. Informational only — nothing is inferred from it."""
     s = p.strip().replace("\\", "/")
     while s.startswith("./"):
         s = s[2:]
     return s.rstrip("/")
 
 
-def _coupling_map(plan: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """Return the *coupled* child-key pairs — children that ``touch`` ≥1 common
-    file and therefore must not run in parallel off the same epic tip.
-
-    Pairs are ordered ``(lo, hi)`` by key for deterministic output and de-duped.
-    A child with no ``touches`` couples with nothing (the planner declared no
-    shared surface). This is the read side of ZFC: deterministic transport over
-    the planner's judgment-authored ``touches``.
-    """
-    keyed = [(c["key"], set(c.get("touches") or [])) for c in plan]
-    coupled: set[tuple[str, str]] = set()
-    for i in range(len(keyed)):
-        for j in range(i + 1, len(keyed)):
-            (ka, ta), (kb, tb) = keyed[i], keyed[j]
-            if ta and tb and (ta & tb):
-                coupled.add(tuple(sorted((ka, kb))))  # type: ignore[arg-type]
-    return sorted(coupled)
-
-
-def _reachable(start: str, deps: dict[str, set[str]]) -> set[str]:
-    """All keys reachable from ``start`` following ``depends_on`` edges (its
-    transitive prerequisites). Used to test whether a coupled pair is already
-    ordered before auto-adding a serialization edge."""
-    seen: set[str] = set()
-    stack = list(deps.get(start, set()))
-    while stack:
-        k = stack.pop()
-        if k in seen:
-            continue
-        seen.add(k)
-        stack.extend(deps.get(k, set()))
-    return seen
-
-
 def _blocks_edges(plan: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """Resolve the full set of ``blocks`` edges to wire as ``(child_key, prereq_key)``.
+    """The ``blocks`` edges to wire, as ``(child_key, prereq_key)`` — exactly the
+    planner's declared ``depends_on``, nothing inferred.
 
-    Two sources, unioned:
-
-    * the planner's declared ``depends_on`` (real output dependencies), and
-    * **coupling-derived** edges: for every coupled pair (sharing a file) that is
-      not already ordered in either direction, add ``(hi, lo)`` so the
-      higher-keyed child stacks after the lower — guaranteeing coupled children
-      never run concurrently on the shared branch.
-
-    Children that neither share a file nor declare a dependency get **no** edge —
-    that is the "blocks only between coupled children" rule. Returns a sorted,
-    de-duped edge list (child depends on prereq).
+    Coupling/ordering is the **planning agent's** judgment: it decides which
+    children must be sequenced (e.g. two children editing the same file get a
+    ``depends_on`` so the second resumes from the first's merged code) and which
+    are independent. The flow only *records* those decisions as bd ``blocks``
+    edges — pure transport. No dependency is derived from ``touches`` here; the
+    plan-critic, not deterministic code, is what checks the planner got it right.
     """
-    deps = {c["key"]: set(c["depends_on"]) for c in plan}
     edges: set[tuple[str, str]] = set()
-    for child, prereqs in deps.items():
-        for prereq in prereqs:
-            edges.add((child, prereq))
-    # Auto-serialize coupled-but-unordered pairs.
-    for lo, hi in _coupling_map(plan):
-        if lo in _reachable(hi, deps) or hi in _reachable(lo, deps):
-            continue  # already ordered (directly or transitively) — leave as-is
-        edges.add((hi, lo))
+    for c in plan:
+        for prereq in c.get("depends_on") or []:
+            edges.add((c["key"], prereq))
     return sorted(edges)
 
 
@@ -275,10 +238,9 @@ def _create_children(
 
     Each child is stamped with its own resolved formula (default
     ``software-dev-agentic``; the planner may set ``minimal-task`` on a trivial
-    child — formula-per-bead-size). ``blocks`` edges come from
-    :func:`_blocks_edges` — the planner's ``depends_on`` plus coupling-derived
-    serialization for any coupled pair left unordered — so coupled children
-    stack and independent children stay parallel.
+    child — formula-per-bead-size). ``blocks`` edges are exactly the planner's
+    declared ``depends_on`` (:func:`_blocks_edges`) — the planning agent owns
+    which children are sequenced vs parallel; the flow only records it.
     """
     child_ids: dict[str, str] = {}  # plan-key → bead id
     for c in plan:
@@ -304,23 +266,21 @@ def _create_children(
             c["formula"],
         )
 
-    # Second pass: wire blocks edges now that every child exists — declared deps
-    # plus coupling-derived serialization (blocks only between coupled children).
+    # Second pass: wire the planner's declared deps as blocks edges now that
+    # every child exists (transport — the planner decided the ordering).
     for child_key, prereq_key in _blocks_edges(plan):
         _bd_dep_add(child_ids[child_key], child_ids[prereq_key], rig_path)
     return list(child_ids.values())
 
 
 def _plan_lanes(plan: list[dict[str, Any]]) -> list[list[str]]:
-    """Group child keys into dependency *levels* over the **resolved** blocks DAG.
+    """Group child keys into dependency *levels* over the planner's dep DAG.
 
-    The DAG is :func:`_blocks_edges` (declared ``depends_on`` plus
-    coupling-derived serialization), not raw ``depends_on``, so the lanes reflect
-    the real conflict-safe shape — coupled children that the planner left
-    unordered still show up stacked. Each returned inner list is a set of
-    children with no unsatisfied prerequisites at that level — i.e. they run **in
-    parallel**. Successive lists are **stacked** (a level waits for all earlier
-    levels). Used by the dry-run to show the lanes without dispatching anything.
+    The DAG is :func:`_blocks_edges` (the planner's declared ``depends_on``). Each
+    returned inner list is a set of children with no unsatisfied prerequisites at
+    that level — i.e. they run **in parallel**. Successive lists are **stacked** (a
+    level waits for all earlier levels). Used by the dry-run to show the lanes
+    without dispatching anything.
     """
     deps: dict[str, set[str]] = {c["key"]: set() for c in plan}
     for child_key, prereq_key in _blocks_edges(plan):
@@ -348,13 +308,12 @@ def _dry_run_summary(
 ) -> dict[str, Any]:
     """Describe what a real run would do, without creating beads or dispatching.
 
-    Surfaces the four phases (PRD artifact, decomposition + coupling map,
-    plan-critic verdict already gated by the caller, and the shared-branch
-    dispatch shape) so the operator sees the whole plan up front. In
-    shared-branch mode it also surfaces the integration-branch name, the single
-    draft PR that would be opened, and the parallel/serial lanes. Best-effort — a
-    stub planner may not have written a parseable ``plan.json``. Satisfies the
-    dry-run acceptance criterion (AC1).
+    Surfaces the phases (PRD artifact, decomposition + the planner's declared dep
+    edges, plan-critic verdict already gated by the caller, and the shared-branch
+    dispatch shape) so the operator sees the whole plan up front. In shared-branch
+    mode it also surfaces the integration-branch name and the parallel/serial
+    lanes. Best-effort — a stub planner may not have written a parseable
+    ``plan.json``. Satisfies the dry-run acceptance criterion (AC1).
     """
     logger.info("agentic-epic: dry-run — skipping bead creation + dispatch")
     out: dict[str, Any] = {"status": "dry-run", "epic_id": epic_id, "children": []}
@@ -368,11 +327,7 @@ def _dry_run_summary(
     except ValueError:
         return out  # no parseable plan (common under StubBackend) — basic summary
     out["children"] = [f"{epic_id}.{c['key']}" for c in plan]
-    coupled = _coupling_map(plan)
-    out["coupling"] = [list(pair) for pair in coupled]
     out["blocks_edges"] = [list(e) for e in _blocks_edges(plan)]
-    if coupled:
-        logger.info("agentic-epic: dry-run — coupled (shared-file) pairs: %s", coupled)
     if shared_branch:
         lanes = _plan_lanes(plan)
         out["lanes"] = lanes
