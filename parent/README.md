@@ -216,12 +216,16 @@ its own PR — no integration branch). Shared-branch is the default because for 
 coupled epic N PRs are the worst of both worlds: parallel children collide on
 merge, serial children are slow and *still* collide.
 
-Mechanics live in `po_formulas/shared_branch.py` (pure git/gh transport, no
-Prefect — unit-tested in `tests/test_shared_branch.py`). Per-child base-off-tip
-+ integrate-on-pass is threaded through `software_dev_agentic`'s `epic_branch` /
-`parent_epic_id` kwargs (passed by `agentic_epic` via `graph_run`'s
-`extra_formula_kwargs`). The PRD/decomposition/critique prompts live under
-`po_formulas/agents/agentic-epic-{prd,planner,plan-critic}/`.
+Mechanics live in `po_formulas/shared_branch.py` (pure git/gh transport + the
+integration lock, no Prefect — unit-tested in `tests/test_shared_branch.py`).
+Per-child base-off-tip is threaded through `software_dev_agentic`'s `epic_branch`
+/ `parent_epic_id` kwargs (passed by `agentic_epic` via `graph_run`'s
+`extra_formula_kwargs`); after a child passes its critic it runs a **merge-back
+agent** (`agents/agentic-merge-back/`) that merges its own branch into the epic
+branch under the lock — there is no deterministic `git merge` in the flow.
+Ordering (which children are sequenced vs parallel) is the **planning agent's**
+judgment, not inferred from `touches`. The PRD/decomposition/critique prompts
+live under `po_formulas/agents/agentic-epic-{prd,planner,plan-critic}/`.
 
 ## `minimal-task` — lightweight pipeline for fanout demos
 

@@ -57,6 +57,8 @@ def _fake_agent_step(calls: list[dict], critic_verdicts: list[str]):
         if step == "review":
             verdict = seq.pop(0) if seq else "fail"
             return AgentStepResult(bead_id=bead, verdict=verdict, closed_by="agent")
+        if step == "merge-back":
+            return AgentStepResult(bead_id=bead, verdict="merged", closed_by="agent")
         return AgentStepResult(bead_id=bead, verdict="complete", closed_by="agent")
 
     return fake
@@ -421,8 +423,10 @@ def test_shared_mode_passes_branch_directive_and_integrates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With `epic_branch` set: the worker gets a non-empty branch_directive, the
-    flow integrates the child branch into the epic branch on pass (instead of
-    the PR sheriff), and skips per-child preview stamping."""
+    CHILD merges itself back via a `merge-back` agent step under the lock (no
+    deterministic merge, no PR sheriff), and skips per-child preview stamping."""
+    import contextlib
+
     rig = tmp_path / "rig"
     rig.mkdir()
     calls: list[dict] = []
@@ -430,16 +434,18 @@ def test_shared_mode_passes_branch_directive_and_integrates(
     monkeypatch.setattr(ag, "agent_step", _fake_agent_step(calls, ["pass"]))
     _patch_common(monkeypatch, closed)
 
-    integrated: dict = {}
+    locked: dict = {}
     monkeypatch.setattr(
         ag.shared_branch, "ensure_integration_worktree",
         lambda rp, eid: tmp_path / "intwt",
     )
-    monkeypatch.setattr(
-        ag.shared_branch, "integrate_child",
-        lambda rp, eid, cid, **k: integrated.update({"eid": eid, "cid": cid})
-        or {"merged": True, "conflict": False, "child_branch": "agentic-c1"},
-    )
+
+    @contextlib.contextmanager
+    def fake_lock(rp, eid):
+        locked["eid"] = eid
+        yield
+
+    monkeypatch.setattr(ag.shared_branch, "integration_lock", fake_lock)
     # PR sheriff and preview stamping must NOT fire in shared mode.
     monkeypatch.setattr(
         ag, "_dispatch_pr_sheriff",
@@ -458,7 +464,13 @@ def test_shared_mode_passes_branch_directive_and_integrates(
     worker_calls = [c for c in calls if c.get("step") == "agentic"]
     directive = worker_calls[0]["ctx"]["branch_directive"]
     assert "epic/e1" in directive and "gh pr create" in directive and "NEVER" in directive
-    assert integrated == {"eid": "e1", "cid": "c1"}
+    # The merge-back ran under the epic lock, in the integration worktree.
+    mb = [c for c in calls if c.get("step") == "merge-back"]
+    assert len(mb) == 1
+    assert mb[0]["ctx"]["epic_branch"] == "epic/e1"
+    assert mb[0]["ctx"]["child_branch"] == "agentic-c1"
+    assert str(mb[0]["ctx"]["worktree"]) == str(tmp_path / "intwt")
+    assert locked["eid"] == "e1"
     assert result["integration"]["merged"] is True
     assert closed == ["c1"]
 
@@ -475,8 +487,8 @@ def test_default_mode_directive_empty_and_sheriff_fires(
     monkeypatch.setattr(ag, "agent_step", _fake_agent_step(calls, ["pass"]))
     _patch_common(monkeypatch, closed)
     monkeypatch.setattr(
-        ag.shared_branch, "integrate_child",
-        lambda *a, **k: pytest.fail("default mode must not integrate"),
+        ag.shared_branch, "ensure_integration_worktree",
+        lambda *a, **k: pytest.fail("default mode must not touch the integration worktree"),
     )
     monkeypatch.setattr(ag, "_stamp_preview_url", lambda *a, **k: "")
     sheriff: list[str] = []
