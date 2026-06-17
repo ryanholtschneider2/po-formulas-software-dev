@@ -4,12 +4,12 @@ You are the **agentic worker** for issue `{{seed_id}}` (iter {{iter}}). You are 
 
 # Right-size your process to the ask
 
-First read the size and intent of this issue off `bd show {{seed_id}}` (and any plan below). Then match your rigor to it — your system prompt has the full "rigor scales to the ask" + PR-level checklist; the short version:
+First read the size and intent of this issue off `bd show {{seed_id}}` (and any plan below). Then match your rigor to it — your system prompt has the full **rigor tier table** (trivial / simple / moderate / complex), the **phase-by-phase how-to** (explore → research → plan → review-plan → implement → baseline+regression → test → lint → review-code → close-the-loop → docs → learn), and the **subagent fan-out playbook**; the short version:
 
 - **Small ask** (typo, config value, one-function fix, single registry entry, doc tweak): just do it. Make the change on the worktree branch, write the one test that covers it, run the repo's tests, commit, open the PR. No plan.md, no subagent ceremony.
-- **Large / PR-level ask** (real feature, new module/formula, schema or public-API change): run the full workflow — deliberate plan, tests covering the new behavior **and its error paths**, doc updates, and any smoke/e2e gate the rig ships.
+- **Large / PR-level ask** (real feature, new module/formula, schema or public-API change): run the full workflow — deliberate plan + the **Verification Strategy table**, baseline before / regression after, tests covering the new behavior **and its error paths**, the **anti-mock checklist** (your system prompt has it verbatim), a code-review pass, real-setting verification, and doc updates. Fan out subagents (explorers, plan-review, lint-workers, code-review, layered tests) per the playbook.
 
-State which mode you picked in your final build-summary line so the critic can judge step-adherence against the right bar. When unsure, lean heavier.
+State which tier you picked in your final build-summary line so the critic can judge step-adherence against the right bar. When unsure, lean heavier.
 
 # Working directory
 
@@ -35,8 +35,8 @@ cat {{run_dir}}/plan.md 2>/dev/null || true
    ```
 
    (No remote → branch off local `main`. Worktree/branch already exists from a prior iter → reuse it.)
-2. **Plan.** If `{{run_dir}}/plan.md` exists, follow it; otherwise plan the minimal correct change for the issue.
-3. **Build.** Implement it on the `agentic-{{seed_id}}` branch. Write the test alongside the code. Commit logical chunks with messages tying back to `{{seed_id}}`. Stage explicit paths (`git add <path>`), never `git add -A`. Leave the tree clean.
+2. **Plan.** If `{{run_dir}}/plan.md` exists, follow it; otherwise plan the minimal correct change for the issue (PR-level → write `{{run_dir}}/plan.md` with the Verification Strategy table; small ask → skip it). For a PR-level change, capture a baseline first — run the existing suite + import/build check into `{{run_dir}}/baseline.txt` so regressions are detectable.
+3. **Build.** Implement it on the `agentic-{{seed_id}}` branch. Write the test alongside the code (cover error paths, not just the happy path). Log non-obvious choices to `{{run_dir}}/decision-log.md` (`Decision` / `Why` / `Alternatives`). No mocks/stubs/placeholders in production code — see the anti-mock checklist in your system prompt. Commit logical chunks with messages tying back to `{{seed_id}}`. Stage explicit paths (`git add <path>`), never `git add -A`. Leave the tree clean.
 4. **Run the repo's own tests / CI.** Run whatever the project runs (a `make test` / `make lint` target, the documented `pytest` invocation, an npm/bun script). Tee the output to `{{run_dir}}/gate-tests.txt` so the critic can read the real result:
 
    ```bash
@@ -46,14 +46,16 @@ cat {{run_dir}}/plan.md 2>/dev/null || true
    ```
 
    Fix anything red and re-run until green. Do not fabricate results.
-5. **Open a PR.** *(SHARED-BRANCH MODE: SKIP this step entirely — the directive above told you to push your branch only. NEVER run `gh pr create` inside a shared-branch epic; the orchestrator opens the one epic PR at the end.)* Otherwise, push the branch and open a pull request for human review:
+5. **Close the loop + open a PR.** For a runtime-affecting change, exercise it in a real setting first (dispatch the changed flow / drive the changed UI / run the real binary) and record the evidence — see "Close the loop" in your system prompt. *(SHARED-BRANCH MODE: SKIP the PR — the directive above told you to push your branch only. NEVER run `gh pr create` inside a shared-branch epic; the orchestrator opens the one epic PR at the end.)* Otherwise, push the branch and open the PR **as a draft**, then flip it ready only once the local gates are green:
 
    ```bash
    git push -u origin agentic-{{seed_id}}
-   gh pr create --fill --base main
+   gh pr create --draft --fill --base main
+   # ...after lint + tests are green locally:
+   gh pr ready <pr-number>
    ```
 
-   Capture the PR number / URL for your close reason. If `gh` is unavailable or there is no remote, say so in your close reason and leave the branch + commits in place — **do NOT merge to `main`.**
+   Capture the PR number / URL for your close reason. If a gate is red or you can't run it locally, leave the PR a draft and name what's unverified. If `gh` is unavailable or there is no remote, say so in your close reason and leave the branch + commits in place — **do NOT merge to `main`.**
 
 {{revision_note}}
 

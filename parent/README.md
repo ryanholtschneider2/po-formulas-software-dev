@@ -90,6 +90,25 @@ for forensics.
 worktree and the PR — judged only on whether it accomplished the goal,
 the minimal prompt-driven way.
 
+**What the prompts encode.** "Minimal flow" doesn't mean "thin prompts."
+`agents/agentic-worker/prompt.md` is a single-actor port of the discipline
+that the deterministic `software-dev-full` role pipeline spreads across 16
+agents: a rigor-tier table (trivial / simple / moderate / complex) that
+right-sizes process to the ask, a phase-by-phase how-to (explore → research
+→ plan + a Verification Strategy table → review-plan → implement + a decision
+log → baseline + regression → test → lint → review-code → close-the-loop →
+docs → learn), a **subagent fan-out playbook** (when/how to spawn explorers,
+a plan reviewer, parallel lint-workers, a code reviewer, layered testers —
+all gated by the tier), and the verbatim **anti-mock BLOCKING checklist**.
+`agents/agentic-reviewer/prompt.md` is the matching single goal-critic: the
+full code-review rubric (correctness / security-BLOCKING / anti-mock-BLOCKING
+/ performance / style / maintainability / decision-log audit) with
+CRITICAL / IMPORTANT / MINOR severities, a per-AC MET/UNMET table, a check
+that the tests *actually ran* and cover error paths, and a rule to challenge
+the worker's self-declared size rather than rubber-stamp it. The worker stays
+a single autonomous actor — this is enrichment-in-place, not a conversion to
+the multi-role flow.
+
 ### PR-sheriff hand-off (auto-merge)
 
 The flow never merges, but after the critic passes it **announces the open
