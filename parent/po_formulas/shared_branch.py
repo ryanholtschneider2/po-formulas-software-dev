@@ -182,9 +182,7 @@ def create_integration_branch(
     return {"branch": branch, "created": True, "pushed": pushed, "remote": remote}
 
 
-def commits_ahead(
-    rig_path: Path | str, base_branch: str, branch: str
-) -> int:
+def commits_ahead(rig_path: Path | str, base_branch: str, branch: str) -> int:
     """How many commits ``branch`` is ahead of ``base_branch`` (``base..branch``).
 
     Used at finalize to decide whether to open the epic PR at all: zero means no
@@ -232,6 +230,21 @@ def open_draft_pr(
     if existing:
         logger.info("shared-branch: PR already exists for %s: %s", branch, existing)
         return {"opened": False, "url": existing, "reason": "PR already exists"}
+
+    # Push the (advanced) integration branch before opening the PR. Children
+    # integrate into epic/<id> in the integration worktree, advancing the branch
+    # past the empty creation point that was pushed at branch-create time. Without
+    # this push, `gh pr create` sees a stale origin ref and fails with
+    # "No commits between <base> and <branch>". Plain push fast-forwards over the
+    # creation push; force-with-lease is a fallback if origin somehow diverged.
+    push = _git(["push", "origin", branch], cwd=repo, check=False)
+    if push.returncode != 0:
+        logger.warning(
+            "shared-branch: ff push of %s failed (%s); retrying with --force-with-lease",
+            branch,
+            (push.stderr or "").strip()[:160],
+        )
+        _git(["push", "--force-with-lease", "origin", branch], cwd=repo, check=False)
 
     proc = subprocess.run(
         [
