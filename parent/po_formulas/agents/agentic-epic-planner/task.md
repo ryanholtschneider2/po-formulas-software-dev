@@ -1,30 +1,43 @@
 You are the **epic planner** for epic `{{seed_id}}` (iter {{iter}}). Decompose its goal into child issues and write the plan as JSON. You do NOT write code or create beads — the flow does that from your file.
 
-# 1. Read the goal and the PRD
+# 1. Read the goal, the PRD, and the design
 
-The epic's description IS the goal; the PRD author has already scoped it into a problem statement, acceptance criteria, and the concrete surfaces/files the work touches. Read both:
+The epic's description IS the goal; the PRD author has scoped it into a problem statement, acceptance criteria, and the concrete surfaces/files the work touches. A brainstorm may also have produced a design doc. Read all that exist:
 
 ```bash
 bd show {{seed_id}}
 cat {{run_dir}}/goal.md 2>/dev/null || true
 cat {{run_dir}}/{{prd_file}} 2>/dev/null || true
+cat {{run_dir}}/{{design_file}} 2>/dev/null || true
 ```
 
-The PRD's **Surfaces / files touched** section is your raw material for the coupling map (step 3.5).
+The PRD's **Surfaces / files touched** section is your raw material for the coupling map (step 3.5). Treat the PRD/design as inputs to **re-verify**, not gospel.
 
-# 2. Explore the codebase
+# 2. Explore the codebase (re-verify)
 
-`{{pack_path}}` is the code root. Read the relevant modules, CLAUDE.md files, and existing patterns so your breakdown reflects the real structure (grep for the surfaces the goal touches; skim the files each child would edit).
+`{{pack_path}}` is the code root. Read the relevant modules, CLAUDE.md files, and existing patterns so your breakdown reflects the **real** structure (grep for the surfaces the goal touches; skim the files each child would edit). Confirm the PRD's surfaces against the actual code — a wrong surface defeats coupling detection.
 
-# 3. Decompose
+# 3. Decompose by LOGICAL SEPARABLE CHUNK
 
-Break the goal into **2–{{max_children}}** child issues. Each child must be one PR-sized, independently-verifiable unit sized for a single `software-dev-agentic` run. Add `depends_on` only where a child truly needs another's output; leave independent children dep-free so they run in parallel.
+Split the goal into **large-but-manageable chunks that make sense to plan, build, test, and document together** — one logical concern per child. **There is no target or maximum number of children**; the right count falls out of the work, never a quota. Apply the boundary tests from your role prompt:
+
+- one logical concern per child (one feature/fix/refactor, not three; not a third of one);
+- within a single module or closely-related modules; a single revertable commit's worth;
+- independently verifiable, with explicit acceptance criteria;
+- children compose to the whole goal with NO gaps and NO overlap;
+- self-contained enough to build blind.
+
+**Decompose by capability, not by layer** (no "backend child / frontend child" for one feature). **Never pad to hit a number**; when unsure, make it ONE child and let the critic split it. **Don't size by time** — size by concern + file scope + acceptance-criteria count. Do NOT create test/lint/smoke children — the end-of-epic finalize step runs the suite, cross-child integration/smoke, and docs once for the whole epic.
+
+Each child's `description` ends with a `## Acceptance criteria` checklist of **observable outcomes** (GOOD: "API returns 401 for invalid tokens"; BAD: "Auth works" / "Implement login").
 
 # 3.5 Capture coupling (this is what keeps the parallel lanes conflict-safe)
 
-The whole epic lands on ONE shared integration branch, and **ordering is YOUR job** — the flow does not infer it. Children that edit the **same files** will collide if they run in parallel off the same tip, so **you must sequence them with a `depends_on`** (the later one then resumes from the earlier one's merged code). Children with disjoint files and no real output dependency you leave **unchained** so they fan out in parallel.
+The whole epic lands on ONE shared integration branch, and **ordering is YOUR job** — the flow records exactly the `depends_on` edges you declare and infers nothing from `touches`.
 
-So the rule is: **declare a `depends_on` between any two children that edit the same file OR where one needs another's output. Leave everything else parallel. Do NOT serialize the whole epic.** This is the most important judgment you make: a missing dep between two same-file children is exactly what causes an integration merge conflict downstream, and the fix is the dep — there is no deterministic auto-coupling and no auto-conflict-resolution to save you. For every child, also list the concrete files it `touches` (from the PRD surfaces + your exploration) — this is the evidence the plan-critic uses to check you sequenced the same-file children correctly.
+**Declare a `depends_on` between any two children that edit the SAME file OR where one needs another's output. Leave everything else parallel. Do NOT serial-chain the whole epic.** A missing dep between two same-file children is exactly what causes an integration merge conflict downstream, and the fix is the dep — there is no deterministic auto-coupling and no auto-conflict-resolution to save you. Apply the ordering principles (infra/setup first; core before polish; shared utils before consumers; tests in finalize).
+
+For every child, list the concrete files it `touches` (from the PRD surfaces + your exploration) — this is the evidence the plan-critic uses to check you sequenced the same-file children correctly. Make `touches` accurate AND complete.
 
 # 4. Write the plan
 
@@ -36,7 +49,7 @@ Write **`{{run_dir}}/{{plan_file}}`** as JSON, exactly this shape:
     {
       "key": "1",
       "title": "short imperative title",
-      "description": "Self-contained bd body: what to do, why, the concrete files/patterns to touch (cite real paths), and an explicit '## Acceptance criteria' checklist. Assume the builder sees ONLY this child's bead.",
+      "description": "Self-contained bd body: what to do, why, the concrete files/patterns to touch (cite real paths), and an explicit '## Acceptance criteria' checklist of observable outcomes. Assume the builder sees ONLY this child's bead.",
       "touches": ["parent/po_formulas/foo.py", "parent/README.md"],
       "depends_on": [],
       "formula": "software-dev-agentic"
@@ -56,9 +69,8 @@ Rules the flow enforces (it will reject the plan otherwise):
 - `key` is a unique short token per child (the bead id becomes `{{seed_id}}.<key>`).
 - every `title` and `description` is non-empty.
 - every `depends_on` entry references another child's `key` (no dangling/cyclic refs).
-- at most {{max_children}} children.
 - `touches` (strongly recommended) is a list of real file paths the child edits. It is NOT auto-wired into deps — it's the evidence the plan-critic uses to verify you added a `depends_on` between every pair of children that share a file. If two children share a file and you did not sequence them, the plan is wrong.
-- `formula` (optional) overrides the per-child formula — default `{{child_formula}}`. For a trivial child (e.g. a one-line link, a single registry entry) set `"formula": "minimal-task"` so it runs the lightweight pipeline instead of the full agentic critic loop.
+- `formula` (optional) overrides the per-child formula — default `{{child_formula}}`. For a trivial child (e.g. a one-line link, a single registry entry) set `"formula": "minimal-task"` so it runs the lightweight pipeline instead of the full agentic critic loop. (A truly trivial change is usually a merge candidate, not its own child — see "merge before splitting".)
 
 Each child is dispatched automatically once your plan passes the critic. Make each description good enough that a worker who sees only that bead can build it correctly.
 
