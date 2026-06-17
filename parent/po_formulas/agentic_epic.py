@@ -6,8 +6,13 @@ shared integration branch + one draft PR** (the po-formulas-software-dev-18m
 executor).
 
 The goal lives in the epic bead's own description (``po run agentic-epic
---epic-id <id>``). Four phases run in order:
+--epic-id <id>``). The phases run in order:
 
+0. **Brainstorm** (gated; ``brainstorm="auto"`` by default) — for a vague or
+   complex goal, an up-front two-role design debate (Product Visionary vs
+   Technical Architect) writes ``<run_dir>/design.md`` for the PRD to build on.
+   The agent self-skips a well-scoped goal (``auto``); ``never`` omits the step,
+   ``always`` forces it. Unattended — no human-approval gate.
 1. **PRD** — one agent turns the goal into a short PRD (problem statement,
    acceptance criteria, the concrete surfaces/files the work touches), written to
    ``<run_dir>/prd.md``.
@@ -25,7 +30,17 @@ The goal lives in the epic bead's own description (``po run agentic-epic
    fans them out via ``graph_run`` with ``shared_branch=True``: one ``epic/<id>``
    integration branch, children parallel where independent and stacked where the
    planner sequenced them, **each child merges its own branch back into the epic
-   branch after it passes its critic**, and the epic PR is opened at finalize.
+   branch after it passes its critic**.
+5. **Finalize** — once every planned child has integrated (and the epic has more
+   than one child), ONE finalize builder runs the epic-wide work no per-child run
+   did: the full rig suite + cross-child integration/smoke, README/roadmap/docs
+   updates, and post-flight artifacts, committed onto the shared branch. Then the
+   epic **acceptance-critic** judges the assembled diff against the PRD and the
+   single epic PR is opened (ready on PASS, draft on FAIL).
+
+There is **no child-count target or cap**: the planner decomposes by *logical
+separable chunk* and the plan-critic — not a number in code — judges whether the
+breakdown is the right size (ZFC: judgment in prompts, mechanism in code).
 
 The flow never merges to ``main``: the single epic PR is the deliverable. The
 flow itself runs no ``git merge`` — integration is the child agent's job (see
@@ -87,6 +102,7 @@ from po_formulas.software_dev import (
 _AGENTS_DIR = Path(__file__).parent / "agents"
 _PLAN_FILE = "plan.json"
 _PRD_FILE = "prd.md"
+_DESIGN_FILE = "design.md"
 _CHILD_FORMULA = "software-dev-agentic"
 
 
@@ -122,12 +138,17 @@ def _plan_revision_note(fix_list: str) -> str:
     )
 
 
-def _parse_plan(run_dir: Path, max_children: int) -> list[dict[str, Any]]:
+def _parse_plan(run_dir: Path) -> list[dict[str, Any]]:
     """Read + validate ``<run_dir>/plan.json`` → ordered list of child specs.
 
     Raises ``ValueError`` with a clear message when the planner produced an
     unusable plan (missing file, malformed JSON, no children, duplicate or
     missing keys) so the flow fails loudly rather than dispatching garbage.
+
+    There is **no child-count cap**: the planner decomposes by *logical separable
+    chunk* (one concern per child, sized to plan/build/test/document together),
+    not to hit a number. Whether the breakdown is the right size — too coarse or
+    too fine — is the plan-critic's judgment, not a numeric gate in code (ZFC).
     """
     raw = _read_text(run_dir / _PLAN_FILE)
     if not raw.strip():
@@ -140,11 +161,6 @@ def _parse_plan(run_dir: Path, max_children: int) -> list[dict[str, Any]]:
     children = data.get("children") if isinstance(data, dict) else None
     if not isinstance(children, list) or not children:
         raise ValueError(f"{_PLAN_FILE} has no non-empty 'children' array")
-    if len(children) > max_children:
-        raise ValueError(
-            f"plan has {len(children)} children > max_children={max_children}; "
-            "raise the cap or ask the planner for a coarser breakdown"
-        )
 
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
@@ -302,7 +318,6 @@ def _plan_lanes(plan: list[dict[str, Any]]) -> list[list[str]]:
 def _dry_run_summary(
     epic_id: str,
     run_dir: Path,
-    max_children: int,
     shared_branch: bool,
     logger: Any,
 ) -> dict[str, Any]:
@@ -323,7 +338,7 @@ def _dry_run_summary(
         out["epic_branch"] = sb.epic_branch_name(epic_id)
         out["would_open_draft_pr"] = True
     try:
-        plan = _parse_plan(run_dir, max_children)
+        plan = _parse_plan(run_dir)
     except ValueError:
         return out  # no parseable plan (common under StubBackend) — basic summary
     out["children"] = [f"{epic_id}.{c['key']}" for c in plan]
@@ -395,6 +410,84 @@ def _acceptance_critique(run_dir: Path) -> str:
     return critique or "(acceptance critic did not write a critique file)"
 
 
+def _create_finalize_bead(
+    *,
+    epic_id: str,
+    rig_path: Path,
+    run_dir: Path,
+    epic_branch: str,
+    base_branch: str,
+    dispatch: dict[str, Any],
+    child_ids: list[str],
+    logger: Any,
+) -> str:
+    """Create the end-of-epic finalize builder child (runs the epic-wide work).
+
+    Dispatched as a ``software-dev-agentic`` worker against the **existing
+    integration branch** (not a fresh branch off ``main``) after every planned
+    child has integrated. It does the cross-cutting work no per-child run could:
+    run the FULL rig suite + integration/smoke spanning multiple children, update
+    README/roadmap/docs, and write post-flight verification artifacts. The bead
+    *description* is transport — the judgment of how to finalize lives in the
+    worker prompt. Mirrors :func:`_create_acceptance_fix_bead`.
+    """
+    requested_id = f"{epic_id}.finalize"
+    description = (
+        f"Finalize epic `{epic_id}`: run the epic-wide verification + housekeeping "
+        "that no single child run could, on the assembled integration branch.\n\n"
+        "Every planned child has built and integrated onto the shared branch "
+        f"`{epic_branch}`. Work directly against that branch (do NOT branch off "
+        f"`{base_branch}`). This is ONE final pass for the whole epic — do not "
+        "re-do per-child work.\n\n"
+        "## Inputs\n\n"
+        f"- PRD: `{run_dir / _PRD_FILE}`\n"
+        f"- Design (if a brainstorm ran): `{run_dir / _DESIGN_FILE}`\n"
+        f"- Base branch: `{base_branch}`\n"
+        f"- Integration branch: `{epic_branch}`\n"
+        f"- Children integrated: {child_ids}\n\n"
+        "## What to do\n\n"
+        "1. **Run the full suite against the rig** — the project's own unit AND "
+        "e2e gates (e.g. `make test-unit` / `make test-e2e`, or the documented "
+        "`pytest` invocation if there is no Makefile). Fix anything the assembled "
+        "diff broke that a per-child run missed (a seam between two children, a "
+        "regression only visible once both landed).\n"
+        "2. **Run integration / smoke checks that span multiple children's work** "
+        "— exercise the feature end-to-end across the children, not just each "
+        "child's slice. Record the commands + results.\n"
+        "3. **Update README / roadmap / docs** so they reflect the assembled "
+        "feature (the per-child runs may each have updated only their slice; make "
+        "the docs coherent for the whole epic).\n"
+        "4. **Write post-flight verification artifacts** to the run dir "
+        f"(`{run_dir}`) — what you ran, what passed, what you fixed.\n\n"
+        "## Acceptance criteria\n\n"
+        "- The full rig suite (unit + e2e) and the cross-child integration/smoke "
+        "checks were actually run and are green, with commands + output recorded.\n"
+        "- README / roadmap / docs describe the assembled epic, not just slices.\n"
+        "- Post-flight artifacts are written to the run dir.\n"
+        "- Do NOT open a child PR; the agentic-epic flow owns the single epic PR."
+    )
+    actual_id = create_child_bead(
+        parent_id=epic_id,
+        # Title is prefixed `epic-finalize` so the idempotency probe
+        # (_EPIC_PROCESS_TITLE) skips it as a process bead, not a planned child.
+        child_id=requested_id,
+        title=f"epic-finalize for {epic_id}",
+        description=description,
+        issue_type="task",
+        rig_path=rig_path,
+        priority=1,
+    )
+    _bd_set_metadata(actual_id, "po.formula", _CHILD_FORMULA, rig_path)
+    _bd_set_metadata(actual_id, "agentic_epic.finalize_for", epic_id, rig_path)
+    logger.info(
+        "agentic-epic: filed finalize builder %s for %s (%d child(ren))",
+        actual_id,
+        epic_id,
+        len(child_ids),
+    )
+    return actual_id
+
+
 def _create_acceptance_fix_bead(
     *,
     epic_id: str,
@@ -433,8 +526,10 @@ def _create_acceptance_fix_bead(
     )
     actual_id = create_child_bead(
         parent_id=epic_id,
+        # Title is prefixed `epic-acceptance-fix` so the idempotency probe
+        # (_EPIC_PROCESS_TITLE) skips it as a process bead, not a planned child.
         child_id=requested_id,
-        title=f"Fix acceptance gaps for {epic_id}",
+        title=f"epic-acceptance-fix for {epic_id}",
         description=description,
         issue_type="task",
         rig_path=rig_path,
@@ -485,10 +580,14 @@ def _run_epic_acceptance_critic(
     return accept.verdict
 
 
-# Epic-process beads (the PRD / plan / plan-critic agent_step iter beads) are
-# parent-child dependents of the epic too, but they are not planned work — skip
-# them when probing for an existing decomposition.
-_EPIC_PROCESS_TITLE = re.compile(r"^epic-(prd|plan|plan-critic)\b", re.IGNORECASE)
+# Epic-process beads (brainstorm / PRD / plan / plan-critic agent_step iter
+# beads, plus the finalize + acceptance-fix builder beads) are parent-child
+# dependents of the epic too, but they are not planned work — skip them when
+# probing for an existing decomposition (else an idempotent re-run would treat
+# them as children and re-dispatch them).
+_EPIC_PROCESS_TITLE = re.compile(
+    r"^epic-(brainstorm|prd|plan|plan-critic|finalize|acceptance)", re.IGNORECASE
+)
 
 
 def _existing_planned_children(epic_id: str, rig_path: Path) -> list[str]:
@@ -519,17 +618,43 @@ def _decompose_epic(
     pack_path_p: Path,
     run_dir: Path,
     plan_iter_cap: int,
-    max_children: int,
+    brainstorm: str,
     shared_branch: bool,
     dry_run: bool,
     logger: Any,
 ) -> list[str] | dict[str, Any]:
-    """Phases 1-3: PRD -> plan (actor-critic) -> create stamped children.
+    """Phases 0-3: (brainstorm) -> PRD -> plan (actor-critic) -> create children.
 
     Returns the created child ids, or (for ``dry_run``) the dry-run summary dict.
     Raises if the plan never passes the critic. Factored out of ``agentic_epic``
     so the flow can SKIP it on an idempotent re-run (children already exist).
     """
+    # ── Phase 0: brainstorm gate (vague/complex goals only) ─────────────
+    # An optional up-front two-role design debate (Product Visionary vs Technical
+    # Architect) that writes <run_dir>/design.md for the PRD to build on. The
+    # *judgment* of whether to debate or skip lives in the agent's prompt
+    # (skip-when-overkill), so `auto` runs one cheap gating turn that self-skips a
+    # well-scoped goal. `never` skips the step entirely; `always` forces the
+    # debate. Unattended — the agent never blocks on human approval.
+    if brainstorm != "never":
+        agent_step(
+            agent_dir=_AGENTS_DIR / "agentic-epic-brainstorm",
+            task=_AGENTS_DIR / "agentic-epic-brainstorm" / "task.md",
+            seed_id=epic_id,
+            rig_path=str(rig_path_p),
+            run_dir=run_dir,
+            step="epic-brainstorm",
+            iter_n=1,
+            ctx={
+                "pack_path": str(pack_path_p),
+                "design_file": _DESIGN_FILE,
+                "brainstorm_mode": brainstorm,
+            },
+            verdict_keywords=("complete", "failed"),
+            dry_run=dry_run,
+        )
+        logger.info("agentic-epic: brainstorm gate (%s) done", brainstorm)
+
     # ── Phase 1: PRD (scope the goal before decomposing it) ─────────────
     agent_step(
         agent_dir=_AGENTS_DIR / "agentic-epic-prd",
@@ -542,6 +667,7 @@ def _decompose_epic(
         ctx={
             "pack_path": str(pack_path_p),
             "prd_file": _PRD_FILE,
+            "design_file": _DESIGN_FILE,
             "revision_note": "",
         },
         verdict_keywords=("complete", "failed"),
@@ -566,7 +692,7 @@ def _decompose_epic(
                 "pack_path": str(pack_path_p),
                 "plan_file": _PLAN_FILE,
                 "prd_file": _PRD_FILE,
-                "max_children": max_children,
+                "design_file": _DESIGN_FILE,
                 "child_formula": _CHILD_FORMULA,
                 "revision_note": _plan_revision_note(fix_list),
             },
@@ -581,7 +707,13 @@ def _decompose_epic(
             run_dir=run_dir,
             step="epic-plan-critic",
             iter_n=iter_n,
-            ctx={"iter": iter_n, "plan_file": _PLAN_FILE, "prd_file": _PRD_FILE},
+            ctx={
+                "iter": iter_n,
+                "pack_path": str(pack_path_p),
+                "plan_file": _PLAN_FILE,
+                "prd_file": _PRD_FILE,
+                "design_file": _DESIGN_FILE,
+            },
             verdict_keywords=("pass", "fail"),
             dry_run=dry_run,
         )
@@ -598,9 +730,9 @@ def _decompose_epic(
 
     # ── Phase 3: create the stamped child beads ────────────────────────
     if dry_run:
-        return _dry_run_summary(epic_id, run_dir, max_children, shared_branch, logger)
+        return _dry_run_summary(epic_id, run_dir, shared_branch, logger)
 
-    plan = _parse_plan(run_dir, max_children)
+    plan = _parse_plan(run_dir)
     child_ids = _create_children(epic_id, plan, rig_path_p, logger)
     logger.info("agentic-epic: created %d child bead(s): %s", len(child_ids), child_ids)
     return child_ids
@@ -614,7 +746,7 @@ def agentic_epic(
     pack_path: str | None = None,
     plan_iter_cap: int = 2,
     iter_cap: int = 2,
-    max_children: int = 12,
+    brainstorm: str = "auto",
     dry_run: bool = False,
     shared_branch: bool = True,
     base_branch: str = "main",
@@ -691,7 +823,7 @@ def agentic_epic(
                 pack_path_p,
                 run_dir,
                 plan_iter_cap,
-                max_children,
+                brainstorm,
                 shared_branch,
                 dry_run,
                 logger,
@@ -736,10 +868,48 @@ def agentic_epic(
         # a complete epic.
         acceptance_fix_id: str | None = None
         acceptance_fix_dispatch: dict[str, Any] | None = None
+        finalize_id: str | None = None
+        finalize_dispatch: dict[str, Any] | None = None
         if shared_branch:
             ahead = sb.commits_ahead(rig_path_p, base_branch, epic_branch)
             accept_verdict = "n/a"
             if ahead > 0:
+                # ── Finalize builder: ONE pass that RUNS the epic-wide work no
+                # per-child run did — the full suite + integration/smoke spanning
+                # children, README/roadmap/docs updates, and post-flight artifacts —
+                # committed onto the shared branch. Skipped for a 1-child "epic"
+                # (that should have been a standalone issue; the lone child already
+                # ran its own suite). One final pass is far cheaper than per-child
+                # finalize ceremony. The acceptance-critic below then judges the
+                # assembled whole on top of this running finalize.
+                if len(child_ids) > 1 and not dry_run:
+                    finalize_id = _create_finalize_bead(
+                        epic_id=epic_id,
+                        rig_path=rig_path_p,
+                        run_dir=run_dir,
+                        epic_branch=epic_branch,
+                        base_branch=base_branch,
+                        dispatch=dispatch,
+                        child_ids=child_ids,
+                        logger=logger,
+                    )
+                    finalize_dispatch = graph_run(
+                        root_id=finalize_id,
+                        rig=rig,
+                        rig_path=str(rig_path_p),
+                        traverse="parent-child,blocks",
+                        formula=_CHILD_FORMULA,
+                        iter_cap=iter_cap,
+                        dry_run=False,
+                        root_as_node=True,
+                        extra_formula_kwargs=extra_kwargs,
+                    )
+                    dispatch = {
+                        **dispatch,
+                        "finalize": {"id": finalize_id, "dispatch": finalize_dispatch},
+                    }
+                    ahead = sb.commits_ahead(rig_path_p, base_branch, epic_branch)
+
                 # Epic acceptance-critic: the ONLY check that reads the PRD against
                 # the assembled diff. Per-child critics judged slices in isolation;
                 # this catches dropped children, unmet acceptance criteria, and hard
@@ -868,6 +1038,8 @@ def agentic_epic(
             "shared_branch": shared_branch,
             "epic_branch": epic_branch or None,
             "pr": pr_info,
+            "finalize_id": finalize_id,
+            "finalize_dispatch": finalize_dispatch,
             "acceptance_fix_id": acceptance_fix_id,
             "acceptance_fix_dispatch": acceptance_fix_dispatch,
         }
