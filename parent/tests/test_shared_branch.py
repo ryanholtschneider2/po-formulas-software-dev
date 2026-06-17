@@ -141,6 +141,55 @@ def test_open_draft_pr_opens(monkeypatch, tmp_path, gh_present):
     assert fake.ran("pr", "create", "--draft", "--base", "main", "--head", "epic/e1")
 
 
+def test_open_draft_pr_pushes_branch_before_create(monkeypatch, tmp_path, gh_present):
+    """The integration branch must be pushed (advanced past the empty creation
+    point) BEFORE `gh pr create`, else gh sees a stale origin ref and fails with
+    'No commits between <base> and <branch>'. Regression for the finalize bug."""
+    fake = FakeRun(
+        {
+            "remote": (0, "origin\n", ""),
+            "pr view": (1, "", "no pr"),
+            "pr create": (0, "https://github.com/x/y/pull/9\n", ""),
+        }
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    info = sb.open_draft_pr(
+        tmp_path, branch="epic/e9", base_branch="main", title="t", body="b"
+    )
+    assert info["opened"] is True
+    assert fake.ran("push", "origin", "epic/e9")
+    push_idx = next(
+        i for i, c in enumerate(fake.calls) if "push" in c and "epic/e9" in " ".join(c)
+    )
+    create_idx = next(
+        i for i, c in enumerate(fake.calls) if "create" in c and "pr" in c
+    )
+    assert push_idx < create_idx, "branch must be pushed before gh pr create"
+
+
+def test_open_draft_pr_force_with_lease_when_ff_push_fails(
+    monkeypatch, tmp_path, gh_present
+):
+    """If the fast-forward push fails (origin diverged), retry with
+    --force-with-lease before creating the PR."""
+    fake = FakeRun(
+        {
+            "remote": (0, "origin\n", ""),
+            "pr view": (1, "", "no pr"),
+            "push origin epic/e8": (1, "", "rejected: non-fast-forward"),
+            "pr create": (0, "https://github.com/x/y/pull/8\n", ""),
+        }
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    info = sb.open_draft_pr(
+        tmp_path, branch="epic/e8", base_branch="main", title="t", body="b"
+    )
+    assert info["opened"] is True
+    assert fake.ran("push", "--force-with-lease", "origin", "epic/e8")
+
+
 def test_open_draft_pr_ready_omits_draft_flag(monkeypatch, tmp_path, gh_present):
     """Finalize opens the epic PR ready-for-review (draft=False): no --draft."""
     fake = FakeRun(
