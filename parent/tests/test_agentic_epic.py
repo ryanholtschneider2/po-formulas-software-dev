@@ -51,7 +51,7 @@ def test_parse_plan_valid(tmp_path):
             ]
         },
     )
-    plan = ae._parse_plan(tmp_path, max_children=12)
+    plan = ae._parse_plan(tmp_path)
     assert [c["key"] for c in plan] == ["1", "2"]
     assert plan[1]["depends_on"] == ["1"]
 
@@ -87,25 +87,28 @@ def test_parse_plan_valid(tmp_path):
 def test_parse_plan_rejects(tmp_path, obj, match):
     _write_plan(tmp_path, obj)
     with pytest.raises(ValueError, match=match):
-        ae._parse_plan(tmp_path, max_children=12)
+        ae._parse_plan(tmp_path)
 
 
 def test_parse_plan_missing_file(tmp_path):
     with pytest.raises(ValueError, match="wrote no plan.json"):
-        ae._parse_plan(tmp_path, max_children=12)
+        ae._parse_plan(tmp_path)
 
 
-def test_parse_plan_over_cap(tmp_path):
+def test_parse_plan_has_no_child_count_cap(tmp_path):
+    """No numeric child-count cap: a large valid plan parses fine. Sizing is the
+    plan-critic's judgment (logical-chunk rule), never a number in code."""
     _write_plan(
         tmp_path,
         {
             "children": [
-                {"key": str(i), "title": "t", "description": "d"} for i in range(5)
+                {"key": str(i), "title": f"t{i}", "description": "d"}
+                for i in range(20)
             ]
         },
     )
-    with pytest.raises(ValueError, match="max_children=3"):
-        ae._parse_plan(tmp_path, max_children=3)
+    plan = ae._parse_plan(tmp_path)
+    assert len(plan) == 20
 
 
 # ── flow happy path ─────────────────────────────────────────────────────────
@@ -641,6 +644,147 @@ def test_integration_summary_marks_landed_and_dropped():
     assert "no per-child results" in ae._integration_summary({})
 
 
+# ── finalize builder (runs the epic-wide suite + docs before acceptance) ──────
+
+
+def test_finalize_runs_for_multi_child_before_acceptance(tmp_path, monkeypatch):
+    """A >1-child epic files + dispatches ONE finalize builder (software-dev-agentic,
+    against the shared branch) AFTER the children integrate and BEFORE the
+    acceptance-critic — the running finalize the acceptance gate sits on top of."""
+    epic_id = "rig-epic-fin"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {
+        "children": [
+            {"key": "1", "title": "a", "description": "d1", "depends_on": []},
+            {"key": "2", "title": "b", "description": "d2", "depends_on": []},
+        ]
+    }
+    _patch_common(monkeypatch, run_dir, plan)
+
+    events: list[str] = []
+    created: list[tuple[str, str]] = []
+    stamped: list[tuple[str, str, str]] = []
+
+    def fake_agent_step(*, agent_dir, step, **kwargs):
+        if step == "epic-plan":
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / ae._PLAN_FILE).write_text(json.dumps(plan))
+        if step == "epic-acceptance-critic":
+            events.append("acceptance")
+        return type("R", (), {"verdict": "pass", "closed_by": "agent"})()
+
+    def fake_graph_run(**k):
+        if k.get("root_as_node"):
+            events.append(f"finalize-dispatch:{k['root_id']}")
+            fid = k["root_id"]
+            return {"status": "ok", "results": {fid: {"integration": {"merged": True}}}}
+        events.append("fanout")
+        return {"status": "ok", "results": {"c1": {"integration": {"merged": True}}}}
+
+    monkeypatch.setattr(ae, "agent_step", fake_agent_step)
+    monkeypatch.setattr(ae, "graph_run", fake_graph_run)
+    monkeypatch.setattr(
+        ae,
+        "create_child_bead",
+        lambda *, parent_id, child_id, **k: (
+            created.append((parent_id, child_id)) or child_id
+        ),
+    )
+    monkeypatch.setattr(
+        ae, "_bd_set_metadata", lambda i, k, v, rp: stamped.append((i, k, v))
+    )
+    monkeypatch.setattr(
+        ae.sb,
+        "create_integration_branch",
+        lambda rp, eid, **k: {
+            "branch": f"epic/{eid}",
+            "created": True,
+            "pushed": True,
+            "remote": True,
+        },
+    )
+    monkeypatch.setattr(ae.sb, "commits_ahead", lambda rp, base, branch: 2)
+    monkeypatch.setattr(
+        ae.sb,
+        "open_draft_pr",
+        lambda rp, **k: {"opened": True, "url": "https://x/pull/7", "reason": ""},
+    )
+    monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
+
+    result = ae.agentic_epic.fn(
+        epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True
+    )
+
+    # Finalize bead created + stamped software-dev-agentic.
+    assert (epic_id, f"{epic_id}.finalize") in created
+    assert (f"{epic_id}.finalize", "po.formula", "software-dev-agentic") in stamped
+    # Dispatched as a root_as_node node, then acceptance ran AFTER it.
+    assert events == [
+        "fanout",
+        f"finalize-dispatch:{epic_id}.finalize",
+        "acceptance",
+    ]
+    assert result["finalize_id"] == f"{epic_id}.finalize"
+
+
+def test_finalize_skipped_for_single_child(tmp_path, monkeypatch):
+    """A 1-child 'epic' skips the finalize builder (the lone child already ran its
+    own suite; a 1-child epic should have been a standalone issue)."""
+    epic_id = "rig-epic-1child"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {
+        "children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]
+    }
+    _patch_common(monkeypatch, run_dir, plan)
+
+    created: list[tuple[str, str]] = []
+
+    def fake_agent_step(*, agent_dir, step, **kwargs):
+        if step == "epic-plan":
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / ae._PLAN_FILE).write_text(json.dumps(plan))
+        return type("R", (), {"verdict": "pass", "closed_by": "agent"})()
+
+    def fake_graph_run(**k):
+        if k.get("root_as_node"):
+            pytest.fail("1-child epic must not dispatch a finalize/fixer node")
+        return {"status": "ok", "results": {"c1": {"integration": {"merged": True}}}}
+
+    monkeypatch.setattr(ae, "agent_step", fake_agent_step)
+    monkeypatch.setattr(ae, "graph_run", fake_graph_run)
+    monkeypatch.setattr(
+        ae,
+        "create_child_bead",
+        lambda *, parent_id, child_id, **k: (
+            created.append((parent_id, child_id)) or child_id
+        ),
+    )
+    monkeypatch.setattr(
+        ae.sb,
+        "create_integration_branch",
+        lambda rp, eid, **k: {
+            "branch": f"epic/{eid}",
+            "created": True,
+            "pushed": True,
+            "remote": True,
+        },
+    )
+    monkeypatch.setattr(ae.sb, "commits_ahead", lambda rp, base, branch: 1)
+    monkeypatch.setattr(
+        ae.sb,
+        "open_draft_pr",
+        lambda rp, **k: {"opened": True, "url": "https://x/pull/8", "reason": ""},
+    )
+    monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
+
+    result = ae.agentic_epic.fn(
+        epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True
+    )
+
+    assert (epic_id, f"{epic_id}.finalize") not in created
+    assert result["finalize_id"] is None
+
+
 def test_agentic_epic_default_is_shared_branch(tmp_path, monkeypatch):
     """The default (no shared_branch kwarg) now lands the epic on ONE integration
     branch + draft PR — shared-branch is the dispatch path, not opt-in."""
@@ -776,7 +920,7 @@ def test_parse_plan_accepts_touches_and_formula(tmp_path):
             ]
         },
     )
-    plan = ae._parse_plan(tmp_path, max_children=12)
+    plan = ae._parse_plan(tmp_path)
     # Leading ./ and trailing / normalized for stable coupling comparison.
     assert plan[0]["touches"] == ["parent/foo.py", "parent/bar.py"]
     assert plan[0]["formula"] == "minimal-task"
@@ -795,7 +939,7 @@ def test_parse_plan_rejects_non_list_touches(tmp_path):
         },
     )
     with pytest.raises(ValueError, match="non-list 'touches'"):
-        ae._parse_plan(tmp_path, max_children=12)
+        ae._parse_plan(tmp_path)
 
 
 # ── _blocks_edges (records the planner's declared deps) ──────────────────────
@@ -832,9 +976,9 @@ def test_blocks_edges_respects_transitive_ordering():
 # ── PRD phase + plan-critic loop ─────────────────────────────────────────────
 
 
-def test_prd_runs_before_decomposition(tmp_path, monkeypatch):
-    """The PRD step must execute before the planner step (it scopes the goal the
-    planner decomposes)."""
+def test_brainstorm_then_prd_then_decomposition_order(tmp_path, monkeypatch):
+    """Phase order: brainstorm gate (default 'auto') → PRD → planner. The PRD
+    scopes the goal the planner decomposes; the brainstorm (if run) precedes both."""
     epic_id = "rig-prd1"
     run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
     plan = {
@@ -858,9 +1002,44 @@ def test_prd_runs_before_decomposition(tmp_path, monkeypatch):
 
     ae.agentic_epic.fn(epic_id=epic_id, rig="r", rig_path=str(tmp_path), dry_run=True)
 
-    assert order[0] == "epic-prd"
-    assert "epic-plan" in order
+    assert order[0] == "epic-brainstorm"
+    assert order.index("epic-brainstorm") < order.index("epic-prd")
     assert order.index("epic-prd") < order.index("epic-plan")
+
+
+def test_brainstorm_never_skips_the_step(tmp_path, monkeypatch):
+    """brainstorm='never' omits the brainstorm step entirely (PRD runs first)."""
+    epic_id = "rig-prd2"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {
+        "children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]
+    }
+    order: list[str] = []
+
+    def fake_agent_step(*, agent_dir, step, **kwargs):
+        order.append(step)
+        if step == "epic-plan":
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / ae._PLAN_FILE).write_text(json.dumps(plan))
+        return type("R", (), {"verdict": "pass", "closed_by": "agent"})()
+
+    monkeypatch.setattr(ae, "get_run_logger", lambda: _NULL_LOGGER)
+    monkeypatch.setattr(ae, "agent_step", fake_agent_step)
+    monkeypatch.setattr(ae, "_bd_show_description", lambda *a, **k: "goal")
+    monkeypatch.setattr(
+        ae, "graph_run", lambda **k: pytest.fail("dry-run must not dispatch")
+    )
+
+    ae.agentic_epic.fn(
+        epic_id=epic_id,
+        rig="r",
+        rig_path=str(tmp_path),
+        dry_run=True,
+        brainstorm="never",
+    )
+
+    assert "epic-brainstorm" not in order
+    assert order[0] == "epic-prd"
 
 
 def test_plan_critic_loop_iterates_on_bad_plan(tmp_path, monkeypatch):

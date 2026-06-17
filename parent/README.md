@@ -135,30 +135,50 @@ not in the agentic dispatch.
 > gate layer is a conscious philosophy reversal, not a bug fix — it needs
 > an explicit human decision, not a silent restore.
 
-## `agentic-epic` — PRD → plan-critic → one shared-branch PR
+## `agentic-epic` — brainstorm → PRD → plan-critic → finalize → one shared-branch PR
 
 `agentic-epic` takes one high-level epic goal and lands it as **one integration
-branch `epic/<epic-id>` + one draft PR**, via four phases:
+branch `epic/<epic-id>` + one PR**, via these phases:
 
 ```bash
 po run agentic-epic --epic-id <id> --rig <name> --rig-path <path>
 ```
 
+0. **Brainstorm** (gated; `--brainstorm auto` by default) — for a *vague or
+   complex* goal, an up-front two-role design debate (a **Product Visionary** and
+   a **Technical Architect** spawned as subagents, debating sequentially over the
+   real code until the Architect emits "NO MORE QUESTIONS") writes
+   `<run_dir>/design.md` for the PRD to build on. The agent **self-skips** a
+   well-scoped goal. Unattended — no human-approval gate. `--brainstorm never`
+   omits the step; `--brainstorm always` forces the debate.
 1. **PRD** — one agent turns the goal into a short PRD (`<run_dir>/prd.md`):
-   problem statement, acceptance criteria, and the concrete surfaces/files the
-   work will touch. The surfaces list is the raw material for coupling detection.
-2. **Decomposition** — a planner breaks the goal into PR-sized child issues,
-   each declaring the files it `touches` (the *coupling map*) plus any real
-   `depends_on` output edge. Written to `<run_dir>/plan.json`.
-3. **Plan-critic loop** — a critic audits the *decomposition* (coverage, sizing,
-   dependencies, buildability, and — most important — whether coupling is
-   captured so the parallel lanes are conflict-safe). Actor-critic on the plan
-   until pass or `plan_iter_cap`, feeding the fix list back to the planner. This
-   gates the exact defect that bites: two children editing the same file left
-   unordered.
+   problem statement, acceptance criteria (observable outcomes), and the concrete
+   surfaces/files the work will touch. The surfaces list is the raw material for
+   coupling detection.
+2. **Decomposition** — a planner breaks the goal into child issues **by logical
+   separable chunk** (one concern per child, sized to plan/build/test/document
+   together — *there is no target or maximum child count*), each declaring the
+   files it `touches` (the coupling evidence) plus any real `depends_on` edge.
+   Written to `<run_dir>/plan.json`.
+3. **Plan-critic loop** — a critic audits the *decomposition* with deep,
+   **code-grounded** checks: it walks the PRD acceptance criteria one by one to
+   confirm coverage, opens the cited files to verify coupling (same-file pairs
+   must be ordered), checks sizing both directions by the logical-chunk rule,
+   dependency correctness, buildability, no layer-decomposition, and ordering.
+   Actor-critic until pass or `plan_iter_cap`, feeding the fix list back to the
+   planner. This gates the exact defect that bites: two children editing the same
+   file left unordered.
 4. **Dispatch** — the flow creates the children (each stamped with its resolved
-   formula), wires `blocks` edges, cuts the `epic/<id>` branch off `main`, opens
-   a single **draft** PR, and fans the children out through `graph_run`.
+   formula), records the planner's `depends_on` as `blocks` edges, cuts the
+   `epic/<id>` branch off `main`, and fans the children out through `graph_run`.
+5. **Finalize** — once every planned child has integrated (and the epic has more
+   than one child), ONE **finalize builder** (a `software-dev-agentic` worker run
+   against the shared branch) does the epic-wide work no per-child run did: the
+   full rig suite (`make test-unit` / `make test-e2e` or the documented `pytest`)
+   + cross-child integration/smoke, README/roadmap/docs updates, and post-flight
+   artifacts. Skipped for a 1-child epic. Then the epic **acceptance-critic**
+   judges the assembled diff against the PRD and the single PR is opened — ready
+   on PASS, draft (with the gap list) on FAIL.
 
 Per-child mechanics in shared-branch mode:
 
@@ -177,31 +197,35 @@ Per-child mechanics in shared-branch mode:
 No remote / no `gh` → the branch + commits are left for a human to PR (graceful
 no-op, never a hard failure).
 
-### Coupling → `blocks` edges (wire blocks ONLY between coupled children)
+### Coupling → `blocks` edges (the planner declares them; the flow records them)
 
 The whole epic lands on **one** branch, so two children that edit the same file
-collide if they run in parallel off the same tip. The planner expresses coupling
-by listing each child's `touches`; the flow derives the coupling map and
-**auto-wires a `blocks` edge for any coupled pair the planner left unordered**,
-so coupled children always stack. Children with disjoint `touches` and no
-declared `depends_on` get **no** edge and fan out in parallel.
+collide if they run in parallel off the same tip. **Ordering is the planner's
+judgment, not the flow's** — the planner declares a `depends_on` between any two
+children that edit the same file (or where one needs another's output), and the
+flow **records exactly those `depends_on` edges as bd `blocks` edges, inferring
+nothing from `touches`**. Children with disjoint files and no declared
+`depends_on` get **no** edge and fan out in parallel. `touches` is *evidence*,
+not a wiring input: the plan-critic opens the cited files and verifies the
+planner sequenced every same-file pair (a missing dep there is exactly what
+causes an integration conflict downstream — and the fix is the dep, since there
+is no deterministic auto-coupling and no auto-conflict-resolution).
 
 This is the rule — *wire `blocks` edges only between children that actually
 couple* — and it directly controls the parallel/serial shape (ZFC:
 branch/worktree/merge mechanics are code; *which children couple* is the
-planner's judgment, expressed as `touches` + `depends_on` and gated by the
-plan-critic). Over-wiring serializes work that could run in parallel;
-under-wiring lets two children edit the same file off the same tip and risk an
-integration conflict — which is why the flow closes the gap automatically and
-the critic double-checks the `touches` accuracy.
+planner's judgment, expressed as `depends_on` with `touches` as the evidence the
+critic checks). Over-wiring serializes work that could run in parallel and pays
+the slow tax while *still* risking conflicts; under-wiring lets two children edit
+the same file off the same tip and collide. The plan-critic, not deterministic
+code, is what guarantees the planner got it right.
 
 **Per-child formula size** — a child may carry `"formula": "minimal-task"` in
 the plan (or any registered formula) to run a lighter pipeline than the default
 `software-dev-agentic` critic loop; trivial children (a one-line link, a single
 registry entry) should use it.
 
-Dry-run shows all four phases + the planned shape without spawning workers or
-touching git:
+Dry-run shows the planned shape without spawning workers or touching git:
 
 ```bash
 po run agentic-epic --epic-id <id> --rig <name> --rig-path <path> --dry-run
@@ -224,8 +248,8 @@ Per-child base-off-tip is threaded through `software_dev_agentic`'s `epic_branch
 agent** (`agents/agentic-merge-back/`) that merges its own branch into the epic
 branch under the lock — there is no deterministic `git merge` in the flow.
 Ordering (which children are sequenced vs parallel) is the **planning agent's**
-judgment, not inferred from `touches`. The PRD/decomposition/critique prompts
-live under `po_formulas/agents/agentic-epic-{prd,planner,plan-critic}/`.
+judgment, not inferred from `touches`. The brainstorm/PRD/decomposition/critique
+prompts live under `po_formulas/agents/agentic-epic-{brainstorm,prd,planner,plan-critic,acceptance-critic}/`.
 
 ## `minimal-task` — lightweight pipeline for fanout demos
 
