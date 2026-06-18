@@ -1,11 +1,13 @@
 You are the **epic acceptance-critic** for epic `{{seed_id}}`. Every child has built and integrated onto `{{epic_branch}}`. Judge whether the integrated whole satisfies the PRD, and return a verdict.
 
-# 1. Read the PRD, the goal, and how integration went
+# 1. Read the PRD, the goal, how integration went, and the finalize artifacts
 
 ```bash
 bd show {{seed_id}}
 cat {{run_dir}}/goal.md 2>/dev/null || true
 cat {{run_dir}}/{{prd_file}} 2>/dev/null || true
+# Post-flight artifacts the finalize builder wrote (suite + integration/smoke results):
+ls {{run_dir}} 2>/dev/null || true
 ```
 
 **Integration summary (which children landed vs. were dropped):**
@@ -13,6 +15,8 @@ cat {{run_dir}}/{{prd_file}} 2>/dev/null || true
 {{integration_summary}}
 
 A child marked conflict / failed did NOT make it onto the branch — its work is missing from the diff below. Treat any acceptance criterion that depended on a dropped child as unmet unless another child happened to cover it.
+
+For a multi-child epic, the finalize builder already ran the full rig suite + cross-child integration/smoke and left post-flight artifacts in the run dir. Read them and confirm the assembled suite actually passed — but verify the claim against the diff yourself; "finalize ran" is not automatically a pass.
 
 # 2. Read the integrated diff (the actual assembled result)
 
