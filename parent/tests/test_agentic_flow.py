@@ -53,7 +53,7 @@ def _fake_agent_step(calls: list[dict], critic_verdicts: list[str]):
     def fake(**kw: object) -> AgentStepResult:
         calls.append(dict(kw))
         step = kw.get("step")
-        bead = f"{kw['seed_id']}.{step}.iter{kw.get('iter_n')}"
+        bead = f"{kw['seed_id']}-{step}-iter{kw.get('iter_n')}"
         if step == "review":
             verdict = seq.pop(0) if seq else "fail"
             return AgentStepResult(bead_id=bead, verdict=verdict, closed_by="agent")
@@ -68,6 +68,88 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, closed: list[str]) -> None:
     monkeypatch.setattr(ag, "get_run_logger", lambda: _NULL_LOGGER)
     monkeypatch.setattr(ag, "claim_issue", lambda *a, **kw: None)
     monkeypatch.setattr(ag, "close_issue", lambda iid, *a, **kw: closed.append(iid))
+
+
+def _run_dir_for(rig: Path, issue_id: str = "seed-1") -> Path:
+    return rig / ".planning" / "software-dev-agentic" / issue_id
+
+
+def test_has_prior_iter_state_discriminates(tmp_path: Path) -> None:
+    rd = tmp_path / "rd"
+    rd.mkdir()
+    assert ag._has_prior_iter_state(rd) is False  # empty -> first dispatch
+    (rd / "metadata.json").write_text("{}")
+    assert ag._has_prior_iter_state(rd) is False  # retry-fresh: metadata only
+    (rd / "iter-bead-ids.json").write_text("{}")
+    assert ag._has_prior_iter_state(rd) is True  # a prior iteration ran
+
+
+def _go_archive(monkeypatch, rig: Path, *, dry_run: bool = False) -> dict:
+    calls: list[dict] = []
+    closed: list[str] = []
+    monkeypatch.setattr(ag, "agent_step", _fake_agent_step(calls, ["pass"]))
+    _patch_common(monkeypatch, closed)
+    return ag.software_dev_agentic.fn(
+        issue_id="seed-1",
+        rig="rig",
+        rig_path=str(rig),
+        iter_cap=1,
+        dry_run=dry_run,
+    )
+
+
+def test_fresh_redispatch_archives_stale_run_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # prefect-orchestration-17xa: a plain re-dispatch (PO_RESUME unset) of an
+    # issue whose run_dir carries prior-iteration state must archive it so the
+    # worker isn't short-circuited by the prior run's closed iter beads.
+    monkeypatch.delenv("PO_RESUME", raising=False)
+    rig = tmp_path / "rig"
+    run_dir = _run_dir_for(rig)
+    run_dir.mkdir(parents=True)
+    (run_dir / "iter-bead-ids.json").write_text('{"seed-1.agentic.1": "seed-1-xyz"}')
+
+    _go_archive(monkeypatch, rig)
+
+    baks = list(run_dir.parent.glob("seed-1.bak-*"))
+    assert len(baks) == 1, "stale run_dir should be archived to a .bak-<UTC> sibling"
+    assert (baks[0] / "iter-bead-ids.json").exists()  # stale map moved aside
+    assert not (run_dir / "iter-bead-ids.json").exists()  # fresh run_dir is clean
+
+
+def test_resume_keeps_run_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PO_RESUME=1 is a real continuation — the run_dir (and its cache) must
+    # survive so completed iters are correctly skipped.
+    monkeypatch.setenv("PO_RESUME", "1")
+    rig = tmp_path / "rig"
+    run_dir = _run_dir_for(rig)
+    run_dir.mkdir(parents=True)
+    (run_dir / "iter-bead-ids.json").write_text("{}")
+
+    _go_archive(monkeypatch, rig)
+
+    assert not list(run_dir.parent.glob("seed-1.bak-*"))  # NOT archived
+    assert (run_dir / "iter-bead-ids.json").exists()  # preserved
+
+
+def test_retry_fresh_run_dir_not_re_archived(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `po retry` already archived and left a fresh run_dir with only
+    # metadata.json — it must not be archived again.
+    monkeypatch.delenv("PO_RESUME", raising=False)
+    rig = tmp_path / "rig"
+    run_dir = _run_dir_for(rig)
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text("{}")
+
+    _go_archive(monkeypatch, rig)
+
+    assert not list(run_dir.parent.glob("seed-1.bak-*"))  # no double-archive
+    assert (run_dir / "metadata.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -133,7 +215,7 @@ def test_critic_fail_then_pass_iterates_and_feeds_fix_list(
     def fake(**kw: object) -> AgentStepResult:
         calls.append(dict(kw))
         step = kw.get("step")
-        bead = f"{kw['seed_id']}.{step}.iter{kw.get('iter_n')}"
+        bead = f"{kw['seed_id']}-{step}-iter{kw.get('iter_n')}"
         if step == "review":
             verdict = seq.pop(0)
             if verdict == "fail":
