@@ -31,8 +31,17 @@ po run software-dev-fast \
 
 Single iteration per role, no critics, no triage / baseline / regression /
 verify / ralph / deploy-smoke / demo-video. Linter and tester auto-fix
-during their work; closes the seed regardless of verdict (the agents
-already did their best on retryable errors).
+during their work, then the flow **auto-closes the seed only when lint is
+`clean` AND unit tests `passed`**. Any other outcome — including an *empty*
+verdict, which means the step never wrote a verdict file (it didn't run, or
+its result is unknown) — leaves the seed **open** and returns
+`status="needs-review"` so the caller can re-dispatch or escalate to
+`software-dev-full`. (Earlier behavior closed regardless of verdict; that
+blind spot let real test regressions through when 9 modules silently failed
+to import and the tester still reported "passed" — see
+`po-formulas-software-dev-7fl`.) The tester now runs a `pytest --collect-only`
+pass first and treats `collection_errors >= 1` (a module that fails to import)
+as a hard FAILED, not a silent skip.
 
 **Per-role defaults**: planner / builder run on `sonnet` + `medium`
 effort (the flow stamps `PO_MODEL=sonnet` + `PO_EFFORT=medium` at flow
