@@ -244,10 +244,15 @@ def _create_children(
     """
     child_ids: dict[str, str] = {}  # plan-key → bead id
     for c in plan:
-        child_id = f"{epic_id}.{c['key']}"
-        create_child_bead(
+        requested_id = f"{epic_id}.{c['key']}"
+        # `create_child_bead` honors `requested_id` on dolt, but br mints its
+        # own id (no `--id` flag) and returns it. Use the RETURNED id for every
+        # downstream op — stamping `po.formula` or building the deps map against
+        # the requested dotted id targets a phantom bead on br (the real bead
+        # exists under the br-assigned id), silently breaking graph_run dispatch.
+        actual_id = create_child_bead(
             parent_id=epic_id,
-            child_id=child_id,
+            child_id=requested_id,
             title=c["title"],
             description=c["description"],
             issue_type="task",
@@ -257,11 +262,11 @@ def _create_children(
         # Stamp the per-child formula so graph_run routes each through the right
         # loop. `_bd_set_metadata` also adds a `formula:<name>` label, which is
         # the only per-bead stamp beads-rust honors (no arbitrary metadata).
-        _bd_set_metadata(child_id, "po.formula", c["formula"], rig_path)
-        child_ids[c["key"]] = child_id
+        _bd_set_metadata(actual_id, "po.formula", c["formula"], rig_path)
+        child_ids[c["key"]] = actual_id
         logger.info(
             "agentic-epic: created %s (%s) [%s]",
-            child_id,
+            actual_id,
             c["title"][:60],
             c["formula"],
         )

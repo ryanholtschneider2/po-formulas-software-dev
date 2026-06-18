@@ -191,6 +191,79 @@ def test_agentic_epic_creates_stamped_children_and_dispatches(tmp_path, monkeypa
     assert result["children"] == [f"{epic_id}.1", f"{epic_id}.2"]
 
 
+def test_agentic_epic_uses_br_assigned_child_id_not_requested(tmp_path, monkeypatch):
+    # prefect-orchestration-3rrd/jj5: on br, create_child_bead can't honor the
+    # requested dotted id — br mints its own and RETURNS it. Stamping the
+    # formula, wiring deps, and the dispatched child set must all use the
+    # returned id, not the phantom `{epic}.{key}` that doesn't exist on br.
+    epic_id = "rig-epic1"
+    rig_path = tmp_path
+    run_dir = rig_path / ".planning" / "agentic-epic" / epic_id
+
+    plan = {
+        "children": [
+            {"key": "1", "title": "add model", "description": "d1", "depends_on": []},
+            {
+                "key": "2",
+                "title": "wire route",
+                "description": "d2",
+                "depends_on": ["1"],
+            },
+        ]
+    }
+
+    def fake_agent_step(*, agent_dir, step, **kwargs):
+        if step == "epic-plan":
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / ae._PLAN_FILE).write_text(json.dumps(plan))
+
+        class _R:
+            verdict = "pass"
+            closed_by = "agent"
+
+        return _R()
+
+    # br mints ids like `rig-9af2`, unrelated to the requested dotted id.
+    br_ids = {f"{epic_id}.1": "rig-aaa1", f"{epic_id}.2": "rig-bbb2"}
+    stamped: list[tuple[str, str, str]] = []
+    deps: list[tuple[str, str]] = []
+    dispatched: dict = {}
+
+    monkeypatch.setattr(ae, "get_run_logger", lambda: _NULL_LOGGER)
+    monkeypatch.setattr(ae, "agent_step", fake_agent_step)
+    monkeypatch.setattr(ae, "claim_issue", lambda *a, **k: None)
+    monkeypatch.setattr(ae, "_bd_show_description", lambda *a, **k: "build the thing")
+    monkeypatch.setattr(
+        ae,
+        "create_child_bead",
+        lambda *, parent_id, child_id, **k: br_ids[child_id],
+    )
+    monkeypatch.setattr(
+        ae, "_bd_set_metadata", lambda i, k, v, rp: stamped.append((i, k, v))
+    )
+    monkeypatch.setattr(ae, "_bd_dep_add", lambda c, d, rp: deps.append((c, d)))
+    monkeypatch.setattr(
+        ae, "graph_run", lambda **k: dispatched.update(k) or {"status": "ok"}
+    )
+    monkeypatch.setattr(ae, "close_issue", lambda i, **k: None)
+
+    result = ae.agentic_epic.fn(
+        epic_id=epic_id,
+        rig="rig",
+        rig_path=str(rig_path),
+        iter_cap=2,
+        plan_iter_cap=2,
+        shared_branch=False,
+    )
+
+    # Everything downstream uses the br-assigned ids, never the dotted request.
+    assert ("rig-aaa1", "po.formula", "software-dev-agentic") in stamped
+    assert ("rig-bbb2", "po.formula", "software-dev-agentic") in stamped
+    assert deps == [("rig-bbb2", "rig-aaa1")]
+    assert result["children"] == ["rig-aaa1", "rig-bbb2"]
+    assert not any(s[0].startswith(f"{epic_id}.") for s in stamped)
+
+
 def test_agentic_epic_idempotent_reuses_existing_children(tmp_path, monkeypatch):
     """A repeat dispatch with planned children already under the epic must NOT
     re-decompose: no `agent_step`, no new beads. It reuses the existing set and
