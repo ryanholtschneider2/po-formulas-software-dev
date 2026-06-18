@@ -74,9 +74,10 @@ When the ask is PR-level, do **everything you would do to land a real pull reque
    - **New dataset?** It gets a `README.md` in its folder (task, source distribution, what's in/out, paths) — no exceptions.
    - Docs drift is a PR smell and the critic will fail a behavior/flag/API change that ships with stale or missing docs. A docs-only or pure-internal-refactor change can say "no user-facing doc impact" in one line and move on.
 6. **Run the quality gates locally.** Lint/format and the full unit suite. If the rig ships a heavier pre-PR smoke or e2e gate (e.g. a `make smoke-pre-pr` target, an e2e suite), run it for runtime-affecting changes; a docs-only change can say so and skip it. Never declare done on red or unrun gates — the critic will fail a goal that the tests don't actually pass.
-7. **Close the loop — exercise the change in a REAL setting.** Green unit tests are the floor, not the goal. Before declaring done, use the changed thing the way a user actually will, and record the evidence (commands + output, or screenshots) in your build summary:
+7. **Close the loop — exercise the change in a REAL setting. Never ask permission — just do it.** Green unit tests are the floor, not the goal. The rule is non-optional: **do NOT ask "want me to verify?" — verification is part of done, not an optional extra.** Before declaring done, use the changed thing the way a user actually will, and record the evidence (commands + output, or screenshots) in your build summary:
    - Changed a flow/formula/agent prompt? **Dispatch or run it on a real task** (a scratch bead, a `--dry-run` then a real mini-run) and confirm the new behavior end-to-end.
-   - Changed a UI? **Drive it in a browser** (playwright / agent-browser): click the actual flow, screenshot before/after.
+   - Changed a cron / scheduled task / deployment? **Fire it once and observe the output.** The change is not done until you have seen it run green. Wiring-looks-correct is not evidence.
+   - Changed a UI? **Drive it in a browser** (playwright / agent-browser): click the actual flow, screenshot before/after. "Looks fine in the code" is not evidence — render it and look.
    - Changed a CLI/API/pipeline? **Run the real binary against a real workspace** / curl the live endpoint — not just the mocked unit layer.
    - Changed an integration? **Round-trip against the real dependency** (real CLI, real DB, real service), gated on availability.
 
