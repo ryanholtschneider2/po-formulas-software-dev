@@ -62,6 +62,43 @@ from po_formulas.software_dev import (
 
 _AGENTS_DIR = Path(__file__).parent / "agents"
 
+# Artifacts that only a prior run's ITERATIONS leave behind. metadata.json is
+# deliberately excluded: `po retry` restores it into a fresh run_dir, and its
+# presence alone must not trigger a (double) archive.
+_PRIOR_ITER_ARTIFACTS = ("iter-bead-ids.json", "role-sessions.json")
+_PRIOR_ITER_GLOBS = ("critique-iter-*.md", "build-iter-*.diff")
+
+
+def _has_prior_iter_state(run_dir: Path) -> bool:
+    """True when *run_dir* holds artifacts from a prior run's iterations.
+
+    Distinguishes a stale re-dispatch (worker/critic already ran once) from a
+    first dispatch (no run_dir / empty) and a `po retry` (fresh run_dir with at
+    most metadata.json). See prefect-orchestration-17xa.
+    """
+    if any((run_dir / name).exists() for name in _PRIOR_ITER_ARTIFACTS):
+        return True
+    if (run_dir / "verdicts").is_dir():
+        return True
+    return any(next(run_dir.glob(pat), None) is not None for pat in _PRIOR_ITER_GLOBS)
+
+
+def _archive_stale_run_dir(run_dir: Path) -> Path | None:
+    """Rename a run_dir carrying prior-iteration state to ``<dir>.bak-<UTC>``.
+
+    Returns the archive path, or None when there's nothing stale to archive
+    (run_dir absent, or empty / retry-fresh). Matches `po retry`'s archive
+    convention so `po artifacts` / forensics find both alike.
+    """
+    if not run_dir.exists() or not _has_prior_iter_state(run_dir):
+        return None
+    from datetime import datetime, timezone
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    archived = run_dir.with_name(f"{run_dir.name}.bak-{stamp}")
+    run_dir.rename(archived)
+    return archived
+
 
 def _revision_note(fix_list: str) -> str:
     """Compose the retry guidance fed to the worker as ``revision_note``.
@@ -297,6 +334,24 @@ def software_dev_agentic(
     rig_path_p = Path(rig_path).expanduser().resolve()
     pack_path_p = Path(pack_path).expanduser().resolve() if pack_path else rig_path_p
     run_dir = rig_path_p / ".planning" / "software-dev-agentic" / issue_id
+    # Fresh-dispatch hygiene (prefect-orchestration-17xa): a plain re-dispatch
+    # of an already-run issue_id reuses this deterministic run_dir, whose stale
+    # iter-bead-ids.json maps the convention key to a PRIOR run's closed bead.
+    # agent_step's fast-path then sees a closed bead and returns
+    # `closed_by=cache` — the worker never runs, the critic fails on no work,
+    # and we get a RUNNING zombie. Archive the stale run_dir so the dispatch
+    # starts clean. A real RESUME (`po resume`, PO_RESUME=1) must keep the
+    # run_dir; `po retry` already archived and leaves only metadata.json, so it
+    # carries no prior-iteration state and is not re-archived here.
+    if not dry_run and os.environ.get("PO_RESUME") != "1":
+        archived = _archive_stale_run_dir(run_dir)
+        if archived is not None:
+            logger.warning(
+                "agentic: fresh dispatch of %s found a prior run_dir — archived "
+                "to %s so the worker runs clean (not from stale cache)",
+                issue_id,
+                archived.name,
+            )
     run_dir.mkdir(parents=True, exist_ok=True)
 
     if claim and not dry_run:
