@@ -319,6 +319,24 @@ def _add_exclude_rules(main_rig: Path, branch: str, patterns: list[str]) -> None
             fh.write(f"{p}\n")
 
 
+def _scrub_worktree(paths: WorktreePaths) -> None:
+    """Reset a reused worktree back to its branch tip, discarding any
+    leftover working-tree state from a prior killed/failed run.
+
+    `git reset --hard <branch>` drops modifications to tracked files;
+    `git clean -fd` removes untracked files and dirs. Neither passes `-x`,
+    so both honor the per-worktree `info/exclude` rules — the shared
+    `.beads/` / `.planning/` symlinks (and the `.worktrees/` nest) are
+    excluded there, so they survive the scrub and get re-wired below.
+
+    Resume runs WANT this: uncommitted work in a reused worktree is debris
+    from a crash, not something to preserve. Set `PO_WTS_REUSE_DIRTY=1` to
+    opt out (caller checks the env before invoking this).
+    """
+    _run(["git", "reset", "--hard", paths.branch], cwd=paths.worktree, check=False)
+    _run(["git", "clean", "-fd"], cwd=paths.worktree, check=False)
+
+
 def setup_worktree(
     rig_path: Path | str,
     issue_id: str,
@@ -328,8 +346,11 @@ def setup_worktree(
 ) -> Path:
     """Create (or refresh) a worktree for this bead. Returns the worktree path.
 
-    Idempotent: if the worktree already exists at the expected path,
-    refreshes the symlinks and returns it.
+    Idempotent: if the worktree already exists at the expected path, the
+    working tree is scrubbed back to the branch tip (`git reset --hard` +
+    `git clean -fd`, honoring exclude rules so shared dirs survive) and the
+    symlinks are refreshed. Set `PO_WTS_REUSE_DIRTY=1` to skip the scrub and
+    preserve any dirty state on reuse.
     """
     paths = _paths_for(rig_path, issue_id, for_epic=for_epic)
 
@@ -346,7 +367,17 @@ def setup_worktree(
     paths.worktree.parent.mkdir(parents=True, exist_ok=True)
 
     if paths.worktree.exists():
-        logger.info("worktree: reusing existing %s", paths.worktree)
+        if os.environ.get("PO_WTS_REUSE_DIRTY") == "1":
+            logger.info(
+                "worktree: reusing existing %s; PO_WTS_REUSE_DIRTY=1 — leaving working tree as-is",
+                paths.worktree,
+            )
+        else:
+            logger.info(
+                "worktree: reusing existing %s; scrubbing working tree",
+                paths.worktree,
+            )
+            _scrub_worktree(paths)
     else:
         # -B resets the branch if it already exists from a prior aborted run.
         _run(
