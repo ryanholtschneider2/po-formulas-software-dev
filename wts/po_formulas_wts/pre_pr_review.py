@@ -22,6 +22,25 @@ Invocation:
     po run pre-pr-review --branch <name> --rig <name> --rig-path <path>
 
 `--epic-id` and `--branch` are mutually exclusive (exactly one required).
+
+False-positive hardening (po-formulas-software-dev-8q5)
+-------------------------------------------------------
+Earlier the gate fired against intermediate epic state and emitted misleading
+findings. Three guards now prevent that:
+
+  * **Quiescence gate (3a).** The run blocks early (validation=blocked, no
+    finding-beads) when the worktree has uncommitted tracked changes or any
+    epic child is still open — the cumulative review only runs against the
+    final, committed state. See ``_quiescence_block_reason``.
+  * **Dedup across retries (3b).** A finding whose bead title already exists as
+    an OPEN child of the epic is skipped, so ``po retry`` / a fresh
+    ``epic-wts`` run no longer re-files identical beads. See
+    ``_existing_open_finding_titles``.
+  * **Tool-errors stay tool-errors (3c).** ``_baseline_checkout`` is lossless
+    (it cleans the tree before checkout, so a dirty worktree no longer aborts
+    it) and a failed cumulative-diff computation surfaces the actual git error
+    as the pillar-2 verdict instead of an empty diff the agent would report as
+    "zero work".
 """
 
 from __future__ import annotations
@@ -102,6 +121,86 @@ def _bd_show_metadata(bead_id: str, rig_path: Path) -> dict[str, Any]:
     return md if isinstance(md, dict) else {}
 
 
+def _worktree_dirty_paths(work_dir: Path) -> list[str]:
+    """Tracked-file modifications that make the worktree non-quiescent.
+
+    Sub-issue 3a: a child's agent loop may leave uncommitted tracked edits
+    (e.g. an in-progress reformat). Reviewing against that intermediate state
+    produces findings that are obsolete by the time a human looks (and the
+    same dirty tree is what blocks the baseline checkout in pillar-1). We
+    intentionally ignore UNTRACKED files (`--untracked-files=no`): `.planning/`
+    run artifacts and other untracked droppings are benign and never block a
+    checkout.
+    """
+    proc = _run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=work_dir)
+    paths: list[str] = []
+    for line in proc.stdout.splitlines():
+        # porcelain v1 lines are "XY <path>" — the path begins at column 3.
+        path = line[3:].strip()
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _open_child_ids(epic_id: str, rig_path: Path) -> list[str]:
+    """Ids of parent-child children of `epic_id` that are not yet closed."""
+    proc = _run(
+        [
+            "bd",
+            "dep",
+            "list",
+            epic_id,
+            "--direction=up",
+            "--type=parent-child",
+            "--json",
+        ],
+        cwd=rig_path,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return []
+    try:
+        rows = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return []
+    out: list[str] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status", "")).lower() == "closed":
+            continue
+        cid = str(row.get("issue_id", "")).strip()
+        if cid:
+            out.append(cid)
+    return out
+
+
+def _quiescence_block_reason(
+    epic_id: str | None, work_dir: Path, rig_path: Path
+) -> str | None:
+    """Return why the epic isn't fully quiesced yet, or None if it is.
+
+    Sub-issue 3a: pre-pr-review must run against the FINAL committed state.
+    A dirty worktree or still-open children means a child's agent loop hasn't
+    drained; findings filed now would be obsolete by review time. Blocking
+    here (with one accurate reason) replaces a flood of fabricated findings.
+    """
+    reasons: list[str] = []
+    dirty = _worktree_dirty_paths(work_dir)
+    if dirty:
+        shown = ", ".join(dirty[:20])
+        more = f" (+{len(dirty) - 20} more)" if len(dirty) > 20 else ""
+        reasons.append(f"worktree has uncommitted tracked changes: {shown}{more}")
+    if epic_id is not None:
+        open_children = _open_child_ids(epic_id, rig_path)
+        if open_children:
+            shown = ", ".join(open_children[:20])
+            more = (
+                f" (+{len(open_children) - 20} more)" if len(open_children) > 20 else ""
+            )
+            reasons.append(f"{len(open_children)} child(ren) still open: {shown}{more}")
+    return "; ".join(reasons) if reasons else None
+
+
 def _resolve_worktree(
     epic_id: str | None,
     branch: str | None,
@@ -155,17 +254,33 @@ def _resolve_worktree(
 
 @contextmanager
 def _baseline_checkout(work_dir: Path, merge_target: str) -> Any:
-    """Stash + checkout origin/<merge_target>; restore on exit."""
+    """Stash + checkout origin/<merge_target>; restore on exit (lossless).
+
+    Sub-issue 3c: `git stash create` only *snapshots* the dirty tree into a
+    commit object — it does NOT clean the working tree. So a subsequent
+    `git checkout origin/<target>` aborts with "Your local changes ... would
+    be overwritten by checkout" whenever a child left uncommitted tracked
+    edits. We therefore `git reset --hard HEAD` after capturing the snapshot
+    (lossless — the snapshot is re-applied via `stash apply` in `finally`),
+    then check out the baseline. If the checkout STILL fails, we raise the
+    *actual* git error; the caller must surface it, never fabricate a
+    "zero diff" finding from a baseline it never managed to set up.
+    """
     log = _logger()
     stash_proc = _run(["git", "stash", "create"], cwd=work_dir)
     stash_ref = stash_proc.stdout.strip()
     head_proc = _run(["git", "rev-parse", "HEAD"], cwd=work_dir)
     prior = head_proc.stdout.strip()
+    # Clean the tree so `git checkout` can't be blocked by local tracked
+    # modifications. Safe because `stash_ref` snapshots them; restored below.
+    if stash_ref:
+        _run(["git", "reset", "--hard", "HEAD"], cwd=work_dir)
     try:
         co = _run(["git", "checkout", f"origin/{merge_target}"], cwd=work_dir)
         if co.returncode != 0:
-            log.warning("baseline checkout failed: %s", co.stderr.strip())
-            raise RuntimeError(f"baseline checkout failed: {co.stderr.strip()}")
+            msg = co.stderr.strip() or f"git checkout origin/{merge_target} failed"
+            log.warning("baseline checkout failed: %s", msg)
+            raise RuntimeError(f"baseline checkout failed: {msg}")
         yield
     finally:
         if prior:
@@ -317,8 +432,15 @@ def _stage_pillar2_inputs(
     merge_target: str,
     rig_path: Path,
     report_dir: Path,
-) -> None:
-    """Pre-stage epic-plan.md + cumulative.diff + child-summaries.md for the agent."""
+) -> str | None:
+    """Pre-stage epic-plan.md + cumulative.diff + child-summaries.md for the agent.
+
+    Returns an error string when the cumulative diff could NOT be computed
+    (e.g. `git diff <target>..<branch>` failed because the branch ref is
+    unresolvable), else None. Sub-issue 3c: a failed diff computation must be
+    surfaced as a tool error, not silently written as an empty diff that the
+    pillar-2 agent then reports as "zero work".
+    """
     plan_path = _epic_plan_path(rig_path, epic_id)
     if plan_path is not None:
         (report_dir / "epic-plan.md").write_text(plan_path.read_text())
@@ -327,11 +449,22 @@ def _stage_pillar2_inputs(
         ["git", "diff", f"{target_ref}..{branch}"],
         cwd=work_dir,
     )
+    if diff_proc.returncode != 0:
+        err = (
+            diff_proc.stderr.strip()
+            or f"git diff {target_ref}..{branch} failed (rc={diff_proc.returncode})"
+        )
+        (report_dir / "cumulative.diff").write_text(
+            "<<< pre-pr-review: could not compute cumulative diff "
+            f"({target_ref}..{branch}) >>>\n{err}\n"
+        )
+        return err
     (report_dir / "cumulative.diff").write_text(diff_proc.stdout)
     if epic_id is not None:
         summary_text = _aggregate_child_summaries(rig_path, epic_id)
         if summary_text:
             (report_dir / "child-summaries.md").write_text(summary_text)
+    return None
 
 
 def _run_pillar_2(
@@ -347,7 +480,19 @@ def _run_pillar_2(
     dry_run: bool = False,
 ) -> PillarResult:
     """Dispatch the pre-pr-reviewer agent, parse `pillar-2-critique.md`."""
-    _stage_pillar2_inputs(epic_id, branch, work_dir, merge_target, rig_path, report_dir)
+    diff_error = _stage_pillar2_inputs(
+        epic_id, branch, work_dir, merge_target, rig_path, report_dir
+    )
+    if diff_error is not None:
+        # Sub-issue 3c: fail loud with the real git error instead of handing
+        # the agent an empty diff it would report as a "zero diff" finding.
+        return PillarResult(
+            name="pillar-2",
+            verdict=_VERDICT_FAILED,
+            summary=f"could not compute cumulative diff: {diff_error}",
+            findings=[],
+            artifacts=[report_dir / "cumulative.diff"],
+        )
     critique_path = report_dir / "pillar-2-critique.md"
     result = _agent_step_task(
         agent_dir=_agent_dir("pre-pr-reviewer"),
@@ -476,6 +621,50 @@ def _teardown_devenv(work_dir: Path, proc: subprocess.Popen[bytes]) -> bool:
 _BEAD_FANOUT_CAP = 20
 
 
+def _finding_bead_title(source: str, title: str) -> str:
+    """The exact title a finding bead is created with (also the dedup key)."""
+    return f"[{source}] {title[:120]}"
+
+
+def _existing_open_finding_titles(epic_id: str, rig_path: Path) -> set[str]:
+    """Titles of OPEN parent-child children of the epic, for dedup (sub-issue 3b).
+
+    Re-running pre-pr-review (`po retry` / a fresh `epic-wts`) re-discovers the
+    same findings and would re-file identical beads with new ids. We use the
+    constructed bead title as the finding signature — beads-rust has no
+    arbitrary metadata, so a `po.finding-key` lookup isn't available; the
+    title is stable and sufficient.
+    """
+    proc = _run(
+        [
+            "bd",
+            "dep",
+            "list",
+            epic_id,
+            "--direction=up",
+            "--type=parent-child",
+            "--json",
+        ],
+        cwd=rig_path,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return set()
+    try:
+        rows = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return set()
+    titles: set[str] = set()
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status", "")).lower() == "closed":
+            continue
+        title = str(row.get("title", "")).strip()
+        if title:
+            titles.add(title)
+    return titles
+
+
 def _file_findings_as_beads(
     findings: list[tuple[str, str, str]],
     epic_id: str | None,
@@ -485,15 +674,25 @@ def _file_findings_as_beads(
 ) -> list[str]:
     """Create one bd bug per finding, capped at `_BEAD_FANOUT_CAP` + rollup.
 
-    `findings` items are `(source_pillar, title, body)`.
+    `findings` items are `(source_pillar, title, body)`. Findings whose bead
+    title already exists as an OPEN child of the epic are skipped (sub-issue
+    3b: no duplicate finding-beads across retries), as are intra-batch
+    duplicates.
     """
     if epic_id is None or dry_run:
         return []
     log = _logger()
     bead_ids: list[str] = []
+    existing = _existing_open_finding_titles(epic_id, rig_path)
+    seen: set[str] = set()
     head = findings[:_BEAD_FANOUT_CAP]
     tail = findings[_BEAD_FANOUT_CAP:]
     for source, title, body in head:
+        bead_title = _finding_bead_title(source, title)
+        if bead_title in existing or bead_title in seen:
+            log.info("pre-pr-review: skipping duplicate finding %r", bead_title)
+            continue
+        seen.add(bead_title)
         proc = _run(
             [
                 "bd",
@@ -501,7 +700,7 @@ def _file_findings_as_beads(
                 "--type=bug",
                 "--priority=1",
                 f"--parent={epic_id}",
-                f"--title=[{source}] {title[:120]}",
+                f"--title={bead_title}",
                 f"--description={body[:8000]}",
             ],
             cwd=rig_path,
@@ -668,6 +867,53 @@ def pre_pr_review(
             "branch": branch_name,
             "report_path": str(report_path),
             "validation": "blocked",
+            "pillars": {
+                "pillar-1": p1.verdict,
+                "pillar-2": p2.verdict,
+                "pillar-3": p3.verdict,
+            },
+            "bead_ids": [],
+        }
+
+    # Sub-issue 3a: all-children-fully-quiesced gate. If the worktree still
+    # has uncommitted tracked changes, or any epic child is still open, the
+    # epic hasn't drained — running the pillars now reviews intermediate state
+    # and files findings the agent will (or already did) resolve. Block with
+    # ONE accurate reason instead, and file no findings.
+    quiescence_reason = _quiescence_block_reason(epic_id, work_dir, rig_path_p)
+    if quiescence_reason:
+        log.warning("pre-pr-review: not quiesced — %s", quiescence_reason)
+        prelude = report_dir / "pillar-0-prelude.md"
+        prelude.write_text(
+            "# Pillar 0 — Prelude\n\n"
+            "**Verdict:** BLOCKED (not quiesced)  \n\n"
+            f"- {quiescence_reason}\n\n"
+            "The epic has not fully drained (uncommitted work or open "
+            "children), so the cumulative review would target intermediate "
+            "state. All three pillars SKIPPED; no finding-beads filed. "
+            "Re-run once the worktree is clean and every child is closed.\n"
+        )
+        skip = lambda name: PillarResult(  # noqa: E731
+            name=name,
+            verdict=_VERDICT_SKIPPED,
+            summary="not quiesced — review deferred",
+        )
+        p1 = skip("pillar-1")
+        p2 = skip("pillar-2")
+        p3 = skip("pillar-3")
+        report_path = _write_validation_report(
+            report_dir, p1, p2, p3, [], branch_name, merge_target
+        )
+        if epic_id and not dry_run:
+            _run(
+                ["bd", "update", epic_id, "--set-metadata", "validation=blocked"],
+                cwd=rig_path_p,
+            )
+        return {
+            "branch": branch_name,
+            "report_path": str(report_path),
+            "validation": "blocked",
+            "quiescence": quiescence_reason,
             "pillars": {
                 "pillar-1": p1.verdict,
                 "pillar-2": p2.verdict,
