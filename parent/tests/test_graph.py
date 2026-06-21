@@ -49,11 +49,13 @@ def test_resolve_formula_unknown_raises_with_known_list() -> None:
 
 def test_check_formula_signature_accepts_compliant_callable() -> None:
     def good(issue_id: str, rig: str, rig_path: str, **_: Any) -> None: ...
+
     graph_mod._check_formula_signature("good", good)  # no raise
 
 
 def test_check_formula_signature_rejects_missing_params() -> None:
     def bad(some_other: str) -> None: ...
+
     with pytest.raises(ValueError) as exc_info:
         graph_mod._check_formula_signature("bad", bad)
     msg = str(exc_info.value)
@@ -99,8 +101,9 @@ def test_dispatch_nodes_passes_block_deps_as_wait_for() -> None:
     def fake_formula(*, issue_id: str, rig: str, rig_path: str, **_: Any) -> dict:
         return {"issue_id": issue_id}
 
-    with patch.object(graph_mod._run_node_task, "submit",
-                      side_effect=_make_capturing_submit(captured)):
+    with patch.object(
+        graph_mod._run_node_task, "submit", side_effect=_make_capturing_submit(captured)
+    ):
         out = graph_mod._dispatch_nodes(
             nodes=nodes,
             rig="r",
@@ -129,17 +132,15 @@ def test_dispatch_nodes_passes_block_deps_as_wait_for() -> None:
 
 def test_dispatch_nodes_max_issues_caps_after_topo() -> None:
     """AC 5: `max_issues` slices the topo-prefix."""
-    nodes = [
-        {"id": str(i), "status": "open", "block_deps": []}
-        for i in range(5)
-    ]
+    nodes = [{"id": str(i), "status": "open", "block_deps": []} for i in range(5)]
     captured: list[dict[str, Any]] = []
 
     def fake(*, issue_id: str, **_: Any) -> dict:
         return {"id": issue_id}
 
-    with patch.object(graph_mod._run_node_task, "submit",
-                      side_effect=_make_capturing_submit(captured)):
+    with patch.object(
+        graph_mod._run_node_task, "submit", side_effect=_make_capturing_submit(captured)
+    ):
         out = graph_mod._dispatch_nodes(
             nodes=nodes,
             rig="r",
@@ -165,8 +166,9 @@ def test_dispatch_nodes_uses_resolved_formula_callable() -> None:
 
     captured: list[dict[str, Any]] = []
     nodes = [{"id": "A", "status": "open", "block_deps": []}]
-    with patch.object(graph_mod._run_node_task, "submit",
-                      side_effect=_make_capturing_submit(captured)):
+    with patch.object(
+        graph_mod._run_node_task, "submit", side_effect=_make_capturing_submit(captured)
+    ):
         graph_mod._dispatch_nodes(
             nodes=nodes,
             rig="r",
@@ -200,13 +202,21 @@ def test_dispatch_nodes_skips_human_sync_point_beads() -> None:
 
     with (
         patch("prefect_orchestration.beads_meta._bd_show", fake_show),
-        patch.object(graph_mod._run_node_task, "submit",
-                     side_effect=_make_capturing_submit(captured)),
+        patch.object(
+            graph_mod._run_node_task,
+            "submit",
+            side_effect=_make_capturing_submit(captured),
+        ),
     ):
         out = graph_mod._dispatch_nodes(
-            nodes=nodes, rig="r", rig_path="/tmp/rig",
-            formula_callable=fake, parent_bead=None,
-            iter_caps={}, dry_run=False, max_issues=None,
+            nodes=nodes,
+            rig="r",
+            rig_path="/tmp/rig",
+            formula_callable=fake,
+            parent_bead=None,
+            iter_caps={},
+            dry_run=False,
+            max_issues=None,
             logger=_NullLogger(),
         )
 
@@ -235,7 +245,9 @@ def test_dispatch_nodes_skips_descendants_of_dispatched_ancestor() -> None:
         return {"id": bid, "metadata": {}}
 
     def fake_dep_list(
-        issue_id: str, direction: str, edge_type: str | None = None,
+        issue_id: str,
+        direction: str,
+        edge_type: str | None = None,
         rig_path: Any = None,
     ) -> list[dict[str, Any]]:
         # Parent-child ancestry: child1.iter1's parent is child1.
@@ -249,13 +261,21 @@ def test_dispatch_nodes_skips_descendants_of_dispatched_ancestor() -> None:
     with (
         patch("prefect_orchestration.beads_meta._bd_show", fake_show),
         patch("prefect_orchestration.beads_meta._bd_dep_list", fake_dep_list),
-        patch.object(graph_mod._run_node_task, "submit",
-                     side_effect=_make_capturing_submit(captured)),
+        patch.object(
+            graph_mod._run_node_task,
+            "submit",
+            side_effect=_make_capturing_submit(captured),
+        ),
     ):
         out = graph_mod._dispatch_nodes(
-            nodes=nodes, rig="r", rig_path="/tmp/rig",
-            formula_callable=fake, parent_bead=None,
-            iter_caps={}, dry_run=False, max_issues=None,
+            nodes=nodes,
+            rig="r",
+            rig_path="/tmp/rig",
+            formula_callable=fake,
+            parent_bead=None,
+            iter_caps={},
+            dry_run=False,
+            max_issues=None,
             logger=_NullLogger(),
         )
 
@@ -293,13 +313,21 @@ def test_dispatch_nodes_per_bead_formula_override() -> None:
     with (
         patch("prefect_orchestration.beads_meta._bd_show", fake_show),
         patch.object(graph_mod, "_resolve_formula", fake_resolve),
-        patch.object(graph_mod._run_node_task, "submit",
-                     side_effect=_make_capturing_submit(captured)),
+        patch.object(
+            graph_mod._run_node_task,
+            "submit",
+            side_effect=_make_capturing_submit(captured),
+        ),
     ):
         graph_mod._dispatch_nodes(
-            nodes=nodes, rig="r", rig_path="/tmp/rig",
-            formula_callable=default_fn, parent_bead=None,
-            iter_caps={}, dry_run=False, max_issues=None,
+            nodes=nodes,
+            rig="r",
+            rig_path="/tmp/rig",
+            formula_callable=default_fn,
+            parent_bead=None,
+            iter_caps={},
+            dry_run=False,
+            max_issues=None,
             logger=_NullLogger(),
         )
 
@@ -314,7 +342,10 @@ def test_formula_name_from_labels() -> None:
         graph_mod._formula_name_from_labels(["feature", "formula:software-dev-agentic"])
         == "software-dev-agentic"
     )
-    assert graph_mod._formula_name_from_labels(["po.formula=agent-step", "x"]) == "agent-step"
+    assert (
+        graph_mod._formula_name_from_labels(["po.formula=agent-step", "x"])
+        == "agent-step"
+    )
     assert graph_mod._formula_name_from_labels(["feature", "bug"]) is None
     assert graph_mod._formula_name_from_labels(None) is None
     assert graph_mod._formula_name_from_labels(["formula:"]) is None  # empty -> None
@@ -383,8 +414,9 @@ def test_dispatch_nodes_filters_iter_caps_by_signature() -> None:
 
     captured: list[dict[str, Any]] = []
     nodes = [{"id": "A", "status": "open", "block_deps": []}]
-    with patch.object(graph_mod._run_node_task, "submit",
-                      side_effect=_make_capturing_submit(captured)):
+    with patch.object(
+        graph_mod._run_node_task, "submit", side_effect=_make_capturing_submit(captured)
+    ):
         graph_mod._dispatch_nodes(
             nodes=nodes,
             rig="r",
@@ -448,12 +480,19 @@ def test_dispatch_nodes_forwards_extra_formula_kwargs_when_accepted() -> None:
     def accepts(*, issue_id, rig, rig_path, epic_branch=None, parent_epic_id=None, **_):
         return {"issue_id": issue_id}
 
-    with patch.object(graph_mod._run_node_task, "submit",
-                      side_effect=_make_capturing_submit(captured)):
+    with patch.object(
+        graph_mod._run_node_task, "submit", side_effect=_make_capturing_submit(captured)
+    ):
         graph_mod._dispatch_nodes(
-            nodes=nodes, rig="r", rig_path="/tmp/rig",
-            formula_callable=accepts, parent_bead="root", iter_caps={},
-            dry_run=False, max_issues=None, logger=_NullLogger(),
+            nodes=nodes,
+            rig="r",
+            rig_path="/tmp/rig",
+            formula_callable=accepts,
+            parent_bead="root",
+            iter_caps={},
+            dry_run=False,
+            max_issues=None,
+            logger=_NullLogger(),
             extra_formula_kwargs={"epic_branch": "epic/e1", "parent_epic_id": "e1"},
         )
     assert captured[0]["kwargs"]["epic_branch"] == "epic/e1"
@@ -467,15 +506,121 @@ def test_dispatch_nodes_drops_extra_kwargs_formula_does_not_accept() -> None:
     def rejects(*, issue_id, rig, rig_path, **_):  # no epic_branch param
         return {"issue_id": issue_id}
 
-    with patch.object(graph_mod._run_node_task, "submit",
-                      side_effect=_make_capturing_submit(captured)):
+    with patch.object(
+        graph_mod._run_node_task, "submit", side_effect=_make_capturing_submit(captured)
+    ):
         graph_mod._dispatch_nodes(
-            nodes=nodes, rig="r", rig_path="/tmp/rig",
-            formula_callable=rejects, parent_bead="root", iter_caps={},
-            dry_run=False, max_issues=None, logger=_NullLogger(),
+            nodes=nodes,
+            rig="r",
+            rig_path="/tmp/rig",
+            formula_callable=rejects,
+            parent_bead="root",
+            iter_caps={},
+            dry_run=False,
+            max_issues=None,
+            logger=_NullLogger(),
             extra_formula_kwargs={"epic_branch": "epic/e1"},
         )
     # **_ would technically swallow it, but the dispatcher filters on named
     # params, so a formula whose signature doesn't *name* epic_branch never
     # receives it (matches the iter_caps contract).
     assert "epic_branch" not in captured[0]["kwargs"]
+
+
+# ── child-level in-flight guard ───────────────────────────────────────────────
+
+
+def test_child_is_in_flight_false_for_open_node() -> None:
+    """open bead → guard never queries Prefect, returns False immediately."""
+    node = {"id": "c1", "status": "open", "block_deps": []}
+    result = graph_mod._child_is_in_flight(node, _NullLogger())
+    assert result is False
+
+
+def test_child_is_in_flight_false_for_in_progress_no_live_flow(monkeypatch) -> None:
+    """in_progress bead but no Running Prefect flow → returns False."""
+    node = {"id": "c2", "status": "in_progress", "block_deps": []}
+    monkeypatch.setattr(graph_mod, "_live_flow_run_count", lambda iid: 0)
+    result = graph_mod._child_is_in_flight(node, _NullLogger())
+    assert result is False
+
+
+def test_child_is_in_flight_true_for_in_progress_with_live_flow(monkeypatch) -> None:
+    """in_progress bead with ≥1 Running Prefect flow → returns True."""
+    node = {"id": "c3", "status": "in_progress", "block_deps": []}
+    monkeypatch.setattr(graph_mod, "_live_flow_run_count", lambda iid: 2)
+    result = graph_mod._child_is_in_flight(node, _NullLogger())
+    assert result is True
+
+
+def test_dispatch_nodes_skips_in_flight_child(monkeypatch) -> None:
+    """A child that is in_progress + has a live flow run must be skipped."""
+    nodes = [
+        {"id": "A", "status": "open", "block_deps": []},
+        {"id": "B", "status": "in_progress", "block_deps": []},  # in-flight
+    ]
+    captured: list[dict] = []
+
+    def fake_formula(*, issue_id: str, rig: str, rig_path: str, **_) -> dict:
+        return {}
+
+    # B has a live flow run
+    monkeypatch.setattr(
+        graph_mod,
+        "_live_flow_run_count",
+        lambda iid: 1 if iid == "B" else 0,
+    )
+
+    with patch.object(
+        graph_mod._run_node_task, "submit", side_effect=_make_capturing_submit(captured)
+    ):
+        result = graph_mod._dispatch_nodes(
+            nodes=nodes,
+            rig="r",
+            rig_path="/tmp/rig",
+            formula_callable=fake_formula,
+            parent_bead="root",
+            iter_caps={},
+            dry_run=False,
+            max_issues=None,
+            logger=_NullLogger(),
+        )
+
+    submitted_ids = [c["kwargs"]["issue_id"] for c in captured]
+    assert "A" in submitted_ids
+    assert "B" not in submitted_ids  # B was in-flight, must be skipped
+    assert result["results"]["B"]["status"] == "skipped"
+    assert "in-flight" in result["results"]["B"]["reason"]
+
+
+def test_dispatch_nodes_does_not_skip_in_progress_without_live_flow(
+    monkeypatch,
+) -> None:
+    """A stale in_progress bead (flow crashed, no live run) is NOT skipped."""
+    nodes = [
+        {"id": "A", "status": "in_progress", "block_deps": []},
+    ]
+    captured: list[dict] = []
+
+    def fake_formula(*, issue_id: str, rig: str, rig_path: str, **_) -> dict:
+        return {}
+
+    # No live flow run
+    monkeypatch.setattr(graph_mod, "_live_flow_run_count", lambda iid: 0)
+
+    with patch.object(
+        graph_mod._run_node_task, "submit", side_effect=_make_capturing_submit(captured)
+    ):
+        graph_mod._dispatch_nodes(
+            nodes=nodes,
+            rig="r",
+            rig_path="/tmp/rig",
+            formula_callable=fake_formula,
+            parent_bead="root",
+            iter_caps={},
+            dry_run=False,
+            max_issues=None,
+            logger=_NullLogger(),
+        )
+
+    assert any(c["kwargs"]["issue_id"] == "A" for c in captured)
