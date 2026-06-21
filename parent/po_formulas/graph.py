@@ -47,6 +47,46 @@ from prefect_orchestration.beads_meta import (
 )
 
 
+def _live_flow_run_count(issue_id: str) -> int:
+    """Count Running Prefect flow runs tagged with issue_id:<id>. Best-effort; returns 0 on error."""
+    try:
+        import anyio
+        from prefect.client.orchestration import get_client
+        from prefect_orchestration import status as _status
+
+        async def _count() -> int:
+            async with get_client() as client:
+                runs = await _status.find_runs_by_issue_id(
+                    client, issue_id=issue_id, state="Running", limit=10
+                )
+                return len(runs)
+
+        return anyio.run(_count)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _child_is_in_flight(node: dict[str, Any], logger: Any) -> bool:
+    """True if this child bead is in-progress with a live Prefect flow run.
+
+    Two-stage check: first the cheap bead-status probe (no network), then a
+    Prefect server query only when the bead is in-progress. If Prefect is
+    unreachable the guard degrades silently (returns False so dispatch proceeds).
+    """
+    if node.get("status") != "in_progress":
+        return False
+    node_id = node["id"]
+    count = _live_flow_run_count(node_id)
+    if count > 0:
+        logger.warning(
+            "graph_run: child %s is in_progress with %d live flow run(s) — skipping re-dispatch",
+            node_id,
+            count,
+        )
+        return True
+    return False
+
+
 def _tag_root_run(root_id: str, logger: Any, *, extra_tag: str | None = None) -> None:
     """Stamp `issue_id:<id>` (+ optional extra) tags on the active flow run.
 
@@ -86,9 +126,7 @@ def _resolve_formula(name: str) -> Callable[..., Any]:
     by_name = {ep.name: ep for ep in eps}
     if name not in by_name:
         known = sorted(by_name)
-        raise ValueError(
-            f"unknown formula {name!r}; known: {known}. Run `po list`."
-        )
+        raise ValueError(f"unknown formula {name!r}; known: {known}. Run `po list`.")
     return by_name[name].load()
 
 
@@ -116,7 +154,9 @@ def _check_formula_signature(name: str, fn: Callable[..., Any]) -> None:
 
 
 @task(name="run_node")
-def _run_node_task(formula_callable: Callable[..., Any], **kwargs: Any) -> dict[str, Any]:
+def _run_node_task(
+    formula_callable: Callable[..., Any], **kwargs: Any
+) -> dict[str, Any]:
     """Task shim: invoke the resolved formula with the given kwargs.
 
     Prefect 3 doesn't allow `flow.submit()`; a task that calls the flow
@@ -158,9 +198,7 @@ def _dispatch_nodes(
     if not ordered:
         return {"status": "empty", "submitted": 0, "results": {}}
 
-    logger.info(
-        f"submitting {len(ordered)} node(s): {[c['id'] for c in ordered]}"
-    )
+    logger.info(f"submitting {len(ordered)} node(s): {[c['id'] for c in ordered]}")
 
     # Resolve the per-node formula. Default = caller's `formula_callable`
     # (already resolved); override = `po.formula` metadata on the bead.
@@ -182,20 +220,19 @@ def _dispatch_nodes(
     per_node_callable: dict[str, Callable[..., Any] | None] = {}
     for node in ordered:
         per_node_callable[node["id"]] = _resolve_per_bead_formula(
-            node, default_callable=formula_callable,
-            rig_path=rig_path, logger=logger,
+            node,
+            default_callable=formula_callable,
+            rig_path=rig_path,
+            logger=logger,
         )
-    dispatchable_ids = {
-        nid for nid, c in per_node_callable.items() if c is not None
-    }
+    dispatchable_ids = {nid for nid, c in per_node_callable.items() if c is not None}
     if len(dispatchable_ids) > 1:
         ancestor_index = _build_pc_ancestor_index(
             list(dispatchable_ids), rig_path=rig_path
         )
         for nid in dispatchable_ids:
             owning = next(
-                (a for a in ancestor_index.get(nid, set())
-                 if a in dispatchable_ids),
+                (a for a in ancestor_index.get(nid, set()) if a in dispatchable_ids),
                 None,
             )
             pc_ownership[nid] = owning
@@ -217,7 +254,13 @@ def _dispatch_nodes(
             skipped[node["id"]] = f"internal to {owning_ancestor}'s formula run"
             logger.info(
                 "skip dispatch %s: parent-child descendant of dispatched %s",
-                node["id"], owning_ancestor,
+                node["id"],
+                owning_ancestor,
+            )
+            continue
+        if _child_is_in_flight(node, logger):
+            skipped[node["id"]] = (
+                "already in-flight (in_progress + live Prefect flow run)"
             )
             continue
         inner = getattr(node_callable, "fn", node_callable)
@@ -262,7 +305,9 @@ def _dispatch_nodes(
 
 
 def _build_pc_ancestor_index(
-    node_ids: list[str], *, rig_path: str,
+    node_ids: list[str],
+    *,
+    rig_path: str,
 ) -> dict[str, set[str]]:
     """For each node, return the set of parent-child ancestors that are
     ALSO in `node_ids`.
@@ -288,13 +333,16 @@ def _build_pc_ancestor_index(
         for _ in range(20):  # safety bound
             try:
                 parents = _bd_dep_list(
-                    cur, direction="down", edge_type="parent-child",
+                    cur,
+                    direction="down",
+                    edge_type="parent-child",
                     rig_path=rig_path,
                 )
             except Exception:  # noqa: BLE001
                 break
             parent_ids = [
-                p.get("id") for p in (parents or [])
+                p.get("id")
+                for p in (parents or [])
                 if isinstance(p, dict) and p.get("id")
             ]
             if not parent_ids:
@@ -380,7 +428,9 @@ def _resolve_per_bead_formula(
     except ValueError as exc:
         logger.warning(
             "skip dispatch %s: formula=%r unresolvable (%s)",
-            node["id"], requested, exc,
+            node["id"],
+            requested,
+            exc,
         )
         return None
 
