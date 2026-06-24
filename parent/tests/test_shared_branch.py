@@ -254,6 +254,59 @@ def test_mark_pr_ready(monkeypatch, tmp_path, gh_present):
     assert fake.ran("pr", "ready", "epic/e1")
 
 
+def test_pr_merge_status_reports_merged(monkeypatch, tmp_path, gh_present):
+    fake = FakeRun(
+        {
+            "remote": (0, "origin\n", ""),
+            "pr view": (
+                0,
+                '{"url":"https://github.com/x/y/pull/7","mergedAt":"2026-06-24T22:00:00Z","state":"MERGED","isDraft":false}\n',
+                "",
+            ),
+        }
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    info = sb.pr_merge_status(tmp_path, branch="epic/e1")
+
+    assert info["merged"] is True
+    assert info["url"] == "https://github.com/x/y/pull/7"
+    assert info["state"] == "MERGED"
+    assert info["reason"] == ""
+
+
+def test_pr_merge_status_reports_open_unmerged(monkeypatch, tmp_path, gh_present):
+    fake = FakeRun(
+        {
+            "remote": (0, "origin\n", ""),
+            "pr view": (
+                0,
+                '{"url":"https://github.com/x/y/pull/8","mergedAt":null,"state":"OPEN","isDraft":false}\n',
+                "",
+            ),
+        }
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    info = sb.pr_merge_status(tmp_path, branch="epic/e2")
+
+    assert info["merged"] is False
+    assert info["url"] == "https://github.com/x/y/pull/8"
+    assert info["state"] == "OPEN"
+    assert info["reason"] == "PR is not merged"
+
+
+def test_pr_merge_status_no_remote_is_graceful(monkeypatch, tmp_path, gh_present):
+    fake = FakeRun({"remote": (0, "", "")})
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    info = sb.pr_merge_status(tmp_path, branch="epic/e1")
+
+    assert info["merged"] is False
+    assert "no remote" in info["reason"]
+    assert not fake.ran("pr", "view")
+
+
 def test_integration_lock_serializes(monkeypatch, tmp_path):
     """The lock is a real flock — acquiring it twice in the same process is fine
     (re-entrant via separate fds is not, but sequential acquire/release is)."""

@@ -421,6 +421,18 @@ def _patch_common(monkeypatch, run_dir, plan):
     monkeypatch.setattr(ae, "_bd_set_metadata", lambda *a, **k: None)
     monkeypatch.setattr(ae, "_bd_dep_add", lambda *a, **k: None)
     monkeypatch.setattr(ae, "close_issue", lambda *a, **k: None)
+    monkeypatch.setattr(ae, "_dispatch_pr_sheriff", lambda *a, **k: None)
+    monkeypatch.setattr(
+        ae.sb,
+        "pr_merge_status",
+        lambda rp, **k: {
+            "merged": True,
+            "url": "https://x/pull/merged",
+            "state": "MERGED",
+            "is_draft": False,
+            "reason": "",
+        },
+    )
 
 
 def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypatch):
@@ -695,6 +707,71 @@ def test_agentic_epic_second_acceptance_fail_opens_draft_and_leaves_epic_open(
     assert result["status"] == "incomplete"
     assert result["pr"]["acceptance_verdict"] == "fail"
     assert closed == []
+
+
+def test_agentic_epic_ready_pr_unmerged_leaves_epic_open_and_dispatches_sheriff(
+    tmp_path, monkeypatch
+):
+    """Regression: an accepted shared-branch epic must not close merely because
+    the final PR is open/ready. Close is gated on the PR being merged."""
+    epic_id = "rig-epic-await-merge"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {
+        "children": [
+            {"key": "1", "title": "a", "description": "d", "depends_on": []}
+        ]
+    }
+    _patch_common(monkeypatch, run_dir, plan)
+
+    monkeypatch.setattr(
+        ae.sb,
+        "create_integration_branch",
+        lambda rp, eid, **k: {
+            "branch": f"epic/{eid}",
+            "created": True,
+            "pushed": True,
+            "remote": True,
+        },
+    )
+    monkeypatch.setattr(ae.sb, "commits_ahead", lambda rp, base, branch: 2)
+    monkeypatch.setattr(
+        ae.sb,
+        "open_draft_pr",
+        lambda rp, **k: {
+            "opened": True,
+            "url": "https://x/pull/10",
+            "reason": "",
+        },
+    )
+    monkeypatch.setattr(
+        ae.sb,
+        "pr_merge_status",
+        lambda rp, **k: {
+            "merged": False,
+            "url": "https://x/pull/10",
+            "state": "OPEN",
+            "is_draft": False,
+            "reason": "PR is not merged",
+        },
+    )
+    monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
+    monkeypatch.setattr(ae, "graph_run", lambda **k: {"status": "ok"})
+    closed: list[str] = []
+    monkeypatch.setattr(ae, "close_issue", lambda i, **k: closed.append(i))
+    sheriff: list[str] = []
+    monkeypatch.setattr(
+        ae, "_dispatch_pr_sheriff", lambda rp, iid, logger: sheriff.append(iid)
+    )
+
+    result = ae.agentic_epic.fn(
+        epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True
+    )
+
+    assert result["status"] == "incomplete"
+    assert result["pr"]["acceptance_verdict"] == "pass"
+    assert result["pr"]["merge"]["merged"] is False
+    assert closed == []
+    assert sheriff == [epic_id]
 
 
 def test_integration_summary_marks_landed_and_dropped():

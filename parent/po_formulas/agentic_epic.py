@@ -2,7 +2,7 @@
 
 A single entry point that **scopes, plans, and dispatches** a whole epic of
 ``software-dev-agentic`` runs from one high-level goal, landing it as **one
-shared integration branch + one draft PR** (the po-formulas-software-dev-18m
+shared integration branch + one integration PR** (the po-formulas-software-dev-18m
 executor).
 
 The goal lives in the epic bead's own description (``po run agentic-epic
@@ -26,6 +26,8 @@ The goal lives in the epic bead's own description (``po run agentic-epic
    integration branch, children parallel where independent and stacked where the
    planner sequenced them, **each child merges its own branch back into the epic
    branch after it passes its critic**, and the epic PR is opened at finalize.
+   The epic bead closes only after that PR is observed merged into the base
+   branch.
 
 The flow never merges to ``main``: the single epic PR is the deliverable. The
 flow itself runs no ``git merge`` — integration is the child agent's job (see
@@ -76,7 +78,7 @@ from prefect_orchestration.beads_meta import (
 )
 
 from po_formulas import shared_branch as sb
-from po_formulas.agentic import _bd_set_metadata, _read_text
+from po_formulas.agentic import _bd_set_metadata, _dispatch_pr_sheriff, _read_text
 from po_formulas.graph import graph_run
 from po_formulas.software_dev import (
     _load_rig_env,
@@ -648,10 +650,11 @@ def agentic_epic(
     own PR**. At finalize, once every child has integrated, an **epic
     acceptance-critic** reads the PRD against the *assembled* diff (the only check
     that does — per-child critics judged slices in isolation): on PASS the single
-    PR is opened ready-for-review; on FAIL it is opened as a **draft** with the
-    gap list, so the PR-sheriff can never auto-merge an incomplete epic. Pass
-    ``shared_branch=False`` to fall back to the legacy per-child-PR path (N
-    independent PRs, one per child).
+    PR is opened ready-for-review and handed to the PR sheriff, but the epic bead
+    closes only after that PR is observed merged into ``base_branch``; on FAIL it
+    is opened as a **draft** with the gap list, so the PR-sheriff can never
+    auto-merge an incomplete epic. Pass ``shared_branch=False`` to fall back to
+    the legacy per-child-PR path (N independent PRs, one per child).
     """
     logger = get_run_logger()
     rig_path_p = Path(rig_path).expanduser().resolve()
@@ -738,7 +741,9 @@ def agentic_epic(
         # ── Phase 4c: shared-branch finalize — open ONE ready PR now ─────────
         # Only when children actually integrated commits (else there is nothing
         # to review). Opened ready-for-review (not draft) so the sheriff acts on
-        # a complete epic.
+        # a complete epic. The epic bead closes only once that PR is merged, so
+        # downstream `po wait <epic>` consumers never proceed from a base branch
+        # missing the epic's integrated work.
         acceptance_fix_id: str | None = None
         acceptance_fix_dispatch: dict[str, Any] | None = None
         if shared_branch:
@@ -830,6 +835,11 @@ def agentic_epic(
                 pr_info["acceptance_verdict"] = accept_verdict
                 if acceptance_fix_id:
                     pr_info["acceptance_fix_id"] = acceptance_fix_id
+                if accept_verdict == "pass" and pr_info.get("url"):
+                    _dispatch_pr_sheriff(rig_path_p, epic_id, logger)
+                    pr_info["merge"] = sb.pr_merge_status(
+                        rig_path_p, branch=epic_branch
+                    )
             else:
                 pr_info = {
                     "opened": False,
@@ -846,16 +856,21 @@ def agentic_epic(
             )
 
         # Legacy fan-out closes on graph completion. Shared-branch epics close
-        # only when final assembled acceptance passes; otherwise the epic stays
-        # open with the fixer/draft PR artifacts attached for follow-up.
+        # only when final assembled acceptance passes AND the integration PR has
+        # actually merged. Open/ready is not enough: closing the bead is the
+        # signal downstream waits use to branch off base.
         close_epic = not shared_branch or (
-            bool(pr_info and pr_info.get("opened"))
+            bool(pr_info and pr_info.get("url"))
             and pr_info.get("acceptance_verdict") == "pass"
+            and bool((pr_info.get("merge") or {}).get("merged"))
         )
         if close_epic:
             close_issue(
                 epic_id,
-                notes=f"po agentic-epic complete: {len(child_ids)} child(ren) dispatched",
+                notes=(
+                    "po agentic-epic complete: "
+                    f"{len(child_ids)} child(ren) dispatched; integration PR merged"
+                ),
                 rig_path=rig_path_p,
             )
         else:

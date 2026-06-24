@@ -138,7 +138,7 @@ not in the agentic dispatch.
 ## `agentic-epic` — PRD → plan-critic → one shared-branch PR
 
 `agentic-epic` takes one high-level epic goal and lands it as **one integration
-branch `epic/<epic-id>` + one draft PR**, via four phases:
+branch `epic/<epic-id>` + one integration PR**, via four phases:
 
 ```bash
 po run agentic-epic --epic-id <id> --rig <name> --rig-path <path>
@@ -157,8 +157,9 @@ po run agentic-epic --epic-id <id> --rig <name> --rig-path <path>
    gates the exact defect that bites: two children editing the same file left
    unordered.
 4. **Dispatch** — the flow creates the children (each stamped with its resolved
-   formula), wires `blocks` edges, cuts the `epic/<id>` branch off `main`, opens
-   a single **draft** PR, and fans the children out through `graph_run`.
+   formula), wires `blocks` edges, cuts the `epic/<id>` branch off `main`, and
+   fans the children out through `graph_run`. The integration PR is deferred
+   until finalize so an incomplete epic is never visible to the PR sheriff.
 
 Per-child mechanics in shared-branch mode:
 
@@ -172,10 +173,17 @@ Per-child mechanics in shared-branch mode:
   never race the shared ref). The merge is clean because coupled children are
   `blocks`-ordered and never run concurrently; a conflict aborts cleanly and is
   reported (rare, not routine).
-- **Finalize:** the draft PR is flipped to ready for human / PR-sheriff review.
+- **Finalize:** after the epic acceptance critic passes, the final integration
+  PR is opened ready for human / PR-sheriff review and handed to the managed
+  sheriff when one owns the rig. The epic bead is closed only after that PR is
+  observed merged into the base branch. If the PR is open but unmerged, missing,
+  or its merge state cannot be checked, the epic remains open so downstream
+  `po wait <epic>` consumers do not branch from a base branch missing the epic's
+  work.
 
 No remote / no `gh` → the branch + commits are left for a human to PR (graceful
-no-op, never a hard failure).
+no-op, never a hard failure), and the epic bead remains open until integration
+is observed.
 
 ### Coupling → `blocks` edges (wire blocks ONLY between coupled children)
 
