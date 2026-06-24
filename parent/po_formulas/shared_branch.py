@@ -9,12 +9,12 @@ all (the merge-back agent) — lives in agents, not here. This module never runs
 ``git merge``.
 
 Shared-branch mode lands a whole coupled epic as **one** integration branch
-``epic/<epic-id>`` and **one** draft PR, instead of N per-child PRs:
+``epic/<epic-id>`` and **one** integration PR, instead of N per-child PRs:
 
 - ``create_integration_branch`` cuts ``epic/<id>`` off ``main`` once (idempotent)
-  and pushes it so the draft PR has a head.
-- ``open_draft_pr`` opens a single draft PR for the branch (graceful no-op when
-  there is no remote or ``gh`` is absent; idempotent if one already exists).
+  and pushes it so child work can branch from a stable remote integration ref.
+- ``open_draft_pr`` opens a single PR for the branch at finalize (graceful no-op
+  when there is no remote or ``gh`` is absent; idempotent if one already exists).
 - Each child runs in its own worktree branched off the **current** epic tip
   (``child_branch_name``); independent children fan out in parallel, ``blocks``-
   chained children stack because a dependent starts only after its prerequisite
@@ -23,7 +23,8 @@ Shared-branch mode lands a whole coupled epic as **one** integration branch
   child passes its critic, the agentic flow runs a *merge-back agent* that merges
   the child branch into ``epic/<id>`` in the integration worktree, holding the
   ``integration_lock`` (the file lock exposed here) so parallel lanes serialize.
-- ``open_draft_pr`` / ``mark_pr_ready`` open + ready the single epic PR at finalize.
+- ``open_draft_pr`` opens the single epic PR at finalize; ``pr_merge_status``
+  checks the close gate so a closed epic bead means the PR has merged.
 
 The module never merges to ``main``; the single epic PR is the deliverable.
 """
@@ -32,6 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import logging
 import os
 import subprocess
@@ -115,7 +117,7 @@ def _gh_available() -> bool:
     return which("gh") is not None
 
 
-# ─── integration branch + draft PR ───
+# ─── integration branch + final PR ───
 
 
 def create_integration_branch(
@@ -129,7 +131,7 @@ def create_integration_branch(
     Idempotent: if the branch already exists locally it is reused untouched (so a
     re-run / retry never discards children already integrated). When a remote is
     present the base is fetched first and the branch is cut off ``origin/<base>``
-    (falling back to the local base), then pushed so the draft PR has a head.
+    (falling back to the local base), then pushed so workers can fetch it.
 
     Returns ``{branch, created, pushed, remote}``.
     """
@@ -270,7 +272,7 @@ def open_draft_pr(
         logger.warning("shared-branch: gh pr create failed: %s", reason)
         return {"opened": False, "url": "", "reason": f"gh pr create failed: {reason}"}
     url = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
-    logger.info("shared-branch: opened draft PR %s", url)
+    logger.info("shared-branch: opened PR %s", url)
     return {"opened": True, "url": url, "reason": ""}
 
 
@@ -288,7 +290,7 @@ def _existing_pr_url(repo: Path, branch: str) -> str:
 
 
 def mark_pr_ready(rig_path: Path | str, *, branch: str) -> dict[str, object]:
-    """Flip the draft PR for ``branch`` to ready-for-review (finalize step).
+    """Mark the PR for ``branch`` ready-for-review.
 
     Graceful no-op when no remote / no ``gh`` / no PR. Returns ``{ready, reason}``.
     """
@@ -309,6 +311,69 @@ def mark_pr_ready(rig_path: Path | str, *, branch: str) -> dict[str, object]:
         return {"ready": False, "reason": f"gh pr ready failed: {reason}"}
     logger.info("shared-branch: marked PR for %s ready", branch)
     return {"ready": True, "reason": ""}
+
+
+def pr_merge_status(rig_path: Path | str, *, branch: str) -> dict[str, object]:
+    """Return the merge state of the PR for ``branch``.
+
+    Graceful no-op when no remote / no ``gh`` / no PR. The shared-branch epic
+    flow uses this as the close gate: an epic bead closes only after the final
+    integration PR reports merged.
+    """
+    repo = Path(rig_path).expanduser().resolve()
+    if not _has_remote(repo):
+        return {
+            "merged": False,
+            "url": "",
+            "state": "",
+            "is_draft": False,
+            "reason": "no remote (local-only repo)",
+        }
+    if not _gh_available():
+        return {
+            "merged": False,
+            "url": "",
+            "state": "",
+            "is_draft": False,
+            "reason": "gh CLI not on PATH",
+        }
+
+    proc = subprocess.run(
+        ["gh", "pr", "view", branch, "--json", "url,mergedAt,state,isDraft"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        reason = (proc.stderr or proc.stdout).strip()[:300]
+        return {
+            "merged": False,
+            "url": "",
+            "state": "",
+            "is_draft": False,
+            "reason": f"gh pr view failed: {reason}",
+        }
+
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return {
+            "merged": False,
+            "url": "",
+            "state": "",
+            "is_draft": False,
+            "reason": "gh pr view returned invalid JSON",
+        }
+
+    state = str(data.get("state") or "")
+    merged = bool(data.get("mergedAt")) or state.upper() == "MERGED"
+    return {
+        "merged": merged,
+        "url": str(data.get("url") or ""),
+        "state": state,
+        "is_draft": bool(data.get("isDraft")),
+        "reason": "" if merged else "PR is not merged",
+    }
 
 
 # ─── integration worktree lifecycle ───
@@ -441,5 +506,6 @@ __all__ = [
     "integration_lock",
     "open_draft_pr",
     "mark_pr_ready",
+    "pr_merge_status",
     "branch_directive",
 ]
