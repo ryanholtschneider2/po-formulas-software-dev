@@ -2,8 +2,8 @@
 transport for agentic-epic (po-formulas-software-dev-18m).
 
 All git/gh shell-outs are monkeypatched: these tests assert the *commands* the
-module issues (branch creation off the right base, idempotent reuse, draft-PR
-open + graceful no-op, mark-ready, integrate merge + conflict abort, lock
+module issues (branch creation off the right base, idempotent reuse, draft-mode
+support where requested, graceful no-op, mark-ready, integrate merge + conflict abort, lock
 serialization) without touching a real repo. A separate real-git round-trip
 (run manually / in e2e) proves the plumbing end-to-end.
 """
@@ -304,6 +304,18 @@ def test_pr_merge_status_no_remote_is_graceful(monkeypatch, tmp_path, gh_present
 
     assert info["merged"] is False
     assert "no remote" in info["reason"]
+    assert not fake.ran("pr", "view")
+
+
+def test_pr_merge_status_no_gh_is_graceful(monkeypatch, tmp_path):
+    fake = FakeRun({"remote": (0, "origin\n", "")})
+    monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setattr(sb, "_gh_available", lambda: False)
+
+    info = sb.pr_merge_status(tmp_path, branch="epic/e1")
+
+    assert info["merged"] is False
+    assert info["reason"] == "gh CLI not on PATH"
     assert not fake.ran("pr", "view")
 
 

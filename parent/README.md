@@ -214,8 +214,8 @@ touching git:
 ```bash
 po run agentic-epic --epic-id <id> --rig <name> --rig-path <path> --dry-run
 # logs: PRD intent, the decomposition, coupled (shared-file) pairs, the resolved
-# blocks edges, the epic/<id> branch + 1 draft PR (intended), and the
-# parallel/serial lanes
+# blocks edges, the epic/<id> branch, the final integration PR intended for
+# finalize, and the parallel/serial lanes
 ```
 
 Pass `--shared-branch=false` to fall back to the **legacy per-child-PR path**

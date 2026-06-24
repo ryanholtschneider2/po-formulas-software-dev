@@ -12,7 +12,7 @@ Shared-branch mode lands a whole coupled epic as **one** integration branch
 ``epic/<epic-id>`` and **one** integration PR, instead of N per-child PRs:
 
 - ``create_integration_branch`` cuts ``epic/<id>`` off ``main`` once (idempotent)
-  and pushes it so the draft PR has a head.
+  and pushes it so child work can branch from a stable remote integration ref.
 - ``open_draft_pr`` opens a single PR for the branch at finalize (graceful no-op
   when there is no remote or ``gh`` is absent; idempotent if one already exists).
 - Each child runs in its own worktree branched off the **current** epic tip
@@ -117,7 +117,7 @@ def _gh_available() -> bool:
     return which("gh") is not None
 
 
-# ─── integration branch + draft PR ───
+# ─── integration branch + final PR ───
 
 
 def create_integration_branch(
@@ -131,7 +131,7 @@ def create_integration_branch(
     Idempotent: if the branch already exists locally it is reused untouched (so a
     re-run / retry never discards children already integrated). When a remote is
     present the base is fetched first and the branch is cut off ``origin/<base>``
-    (falling back to the local base), then pushed so the draft PR has a head.
+    (falling back to the local base), then pushed so workers can fetch it.
 
     Returns ``{branch, created, pushed, remote}``.
     """
@@ -272,7 +272,7 @@ def open_draft_pr(
         logger.warning("shared-branch: gh pr create failed: %s", reason)
         return {"opened": False, "url": "", "reason": f"gh pr create failed: {reason}"}
     url = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
-    logger.info("shared-branch: opened draft PR %s", url)
+    logger.info("shared-branch: opened PR %s", url)
     return {"opened": True, "url": url, "reason": ""}
 
 
@@ -290,7 +290,7 @@ def _existing_pr_url(repo: Path, branch: str) -> str:
 
 
 def mark_pr_ready(rig_path: Path | str, *, branch: str) -> dict[str, object]:
-    """Flip the draft PR for ``branch`` to ready-for-review (finalize step).
+    """Mark the PR for ``branch`` ready-for-review.
 
     Graceful no-op when no remote / no ``gh`` / no PR. Returns ``{ready, reason}``.
     """

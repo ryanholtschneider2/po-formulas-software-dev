@@ -793,7 +793,7 @@ def test_integration_summary_marks_landed_and_dropped():
 
 def test_agentic_epic_default_is_shared_branch(tmp_path, monkeypatch):
     """The default (no shared_branch kwarg) now lands the epic on ONE integration
-    branch + draft PR — shared-branch is the dispatch path, not opt-in."""
+    branch + final integration PR — shared-branch is the dispatch path, not opt-in."""
     epic_id = "rig-epic-default"
     run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
     plan = {
@@ -873,7 +873,7 @@ def test_agentic_epic_shared_branch_false_opts_out(tmp_path, monkeypatch):
 
 
 def test_agentic_epic_shared_branch_dry_run(tmp_path, monkeypatch):
-    """Dry-run shows the epic branch + draft-PR intent + parallel/serial lanes
+    """Dry-run shows the epic branch + final-PR intent + parallel/serial lanes
     without creating beads, branches, or dispatching (AC1)."""
     epic_id = "rig-epic3"
     run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id

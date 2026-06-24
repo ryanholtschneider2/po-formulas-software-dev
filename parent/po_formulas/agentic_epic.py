@@ -328,7 +328,7 @@ def _dry_run_summary(
     if shared_branch:
         out["shared_branch"] = True
         out["epic_branch"] = sb.epic_branch_name(epic_id)
-        out["would_open_draft_pr"] = True
+        out["would_open_integration_pr_at_finalize"] = True
     try:
         plan = _parse_plan(run_dir, max_children)
     except ValueError:
