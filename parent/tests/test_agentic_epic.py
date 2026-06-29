@@ -479,6 +479,7 @@ def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypa
     assert calls["create"][0] == epic_id
     assert calls["create"][1]["base_branch"] == "main"
     assert dispatched["extra_formula_kwargs"] == {
+        "base_branch": "main",
         "epic_branch": f"epic/{epic_id}",
         "parent_epic_id": epic_id,
     }
@@ -539,9 +540,7 @@ def test_agentic_epic_acceptance_fail_runs_fixer_then_opens_ready_pr(
     epic_id = "rig-epic-accept-fail"
     run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
     plan = {
-        "children": [
-            {"key": "1", "title": "a", "description": "d", "depends_on": []}
-        ]
+        "children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]
     }
     _patch_common(monkeypatch, run_dir, plan)
 
@@ -564,14 +563,24 @@ def test_agentic_epic_acceptance_fail_runs_fixer_then_opens_ready_pr(
 
     monkeypatch.setattr(ae, "agent_step", fake_agent_step)
     monkeypatch.setattr(
-        ae.sb, "create_integration_branch",
-        lambda rp, eid, **k: {"branch": f"epic/{eid}", "created": True, "pushed": True, "remote": True},
+        ae.sb,
+        "create_integration_branch",
+        lambda rp, eid, **k: {
+            "branch": f"epic/{eid}",
+            "created": True,
+            "pushed": True,
+            "remote": True,
+        },
     )
     monkeypatch.setattr(ae.sb, "commits_ahead", lambda rp, base, branch: 3)
     pr_calls: dict = {}
     monkeypatch.setattr(
-        ae.sb, "open_draft_pr",
-        lambda rp, **k: pr_calls.update(k) or {"opened": True, "url": "https://x/pull/5", "reason": ""},
+        ae.sb,
+        "open_draft_pr",
+        lambda rp, **k: (
+            pr_calls.update(k)
+            or {"opened": True, "url": "https://x/pull/5", "reason": ""}
+        ),
     )
     monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
     graph_calls: list[dict] = []
@@ -612,6 +621,7 @@ def test_agentic_epic_acceptance_fail_runs_fixer_then_opens_ready_pr(
     assert graph_calls[1]["root_id"] == f"{epic_id}.acceptance-fix"
     assert graph_calls[1]["root_as_node"] is True
     assert graph_calls[1]["extra_formula_kwargs"] == {
+        "base_branch": "main",
         "epic_branch": f"epic/{epic_id}",
         "parent_epic_id": epic_id,
     }
@@ -636,9 +646,7 @@ def test_agentic_epic_second_acceptance_fail_opens_draft_and_leaves_epic_open(
     epic_id = "rig-epic-accept-fail-twice"
     run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
     plan = {
-        "children": [
-            {"key": "1", "title": "a", "description": "d", "depends_on": []}
-        ]
+        "children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]
     }
     _patch_common(monkeypatch, run_dir, plan)
 
@@ -668,8 +676,10 @@ def test_agentic_epic_second_acceptance_fail_opens_draft_and_leaves_epic_open(
     monkeypatch.setattr(
         ae.sb,
         "open_draft_pr",
-        lambda rp, **k: pr_calls.update(k)
-        or {"opened": True, "url": "https://x/pull/6", "reason": ""},
+        lambda rp, **k: (
+            pr_calls.update(k)
+            or {"opened": True, "url": "https://x/pull/6", "reason": ""}
+        ),
     )
     monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
 
@@ -701,9 +711,17 @@ def test_integration_summary_marks_landed_and_dropped():
     dispatch = {
         "results": {
             "c1": {"integration": {"merged": True}},
-            "c2": {"integration": {"merged": False, "conflict": True, "reason": "merge conflict: IdeaCard.tsx"}},
+            "c2": {
+                "integration": {
+                    "merged": False,
+                    "conflict": True,
+                    "reason": "merge conflict: IdeaCard.tsx",
+                }
+            },
             "c3": RuntimeError("did not converge after 2 iter(s) — critic=fail"),
-            "c4": {"integration": {"merged": False, "conflict": False, "reason": "skipped"}},
+            "c4": {
+                "integration": {"merged": False, "conflict": False, "reason": "skipped"}
+            },
         }
     }
     s = ae._integration_summary(dispatch)
@@ -759,14 +777,16 @@ def test_agentic_epic_default_is_shared_branch(tmp_path, monkeypatch):
     assert result["shared_branch"] is True
     assert result["epic_branch"] == f"epic/{epic_id}"
     assert dispatched["extra_formula_kwargs"] == {
+        "base_branch": "main",
         "epic_branch": f"epic/{epic_id}",
         "parent_epic_id": epic_id,
     }
 
 
 def test_agentic_epic_shared_branch_false_opts_out(tmp_path, monkeypatch):
-    """shared_branch=False must NOT create a branch / PR and must dispatch with no
-    extra_formula_kwargs (the legacy per-child-PR path, unchanged)."""
+    """shared_branch=False must NOT create a branch / PR. Children still get the
+    epic's base_branch threaded (so their per-child PRs target it, not `main`),
+    but none of the shared-branch transport is touched."""
     epic_id = "rig-epic2"
     run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
     plan = {
@@ -790,7 +810,7 @@ def test_agentic_epic_shared_branch_false_opts_out(tmp_path, monkeypatch):
         epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=False
     )
 
-    assert dispatched["extra_formula_kwargs"] is None
+    assert dispatched["extra_formula_kwargs"] == {"base_branch": "main"}
     assert result["shared_branch"] is False
     assert result["epic_branch"] is None
 

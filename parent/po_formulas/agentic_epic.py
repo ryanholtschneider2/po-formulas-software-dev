@@ -373,17 +373,23 @@ def _integration_summary(dispatch: dict[str, Any]) -> str:
                 )
             else:
                 detail = integ.get("reason") or res.get("status") or "unknown"
-                lines.append(f"- `{cid}`: DROPPED — not integrated ({str(detail)[:140]})")
+                lines.append(
+                    f"- `{cid}`: DROPPED — not integrated ({str(detail)[:140]})"
+                )
         else:
             lines.append(f"- `{cid}`: FAILED — {str(res)[:140]}")
     acceptance_fix = (dispatch or {}).get("acceptance_fix") or {}
     if isinstance(acceptance_fix, dict):
         fix_id = acceptance_fix.get("id")
         fix_dispatch = acceptance_fix.get("dispatch") or {}
-        fix_results = fix_dispatch.get("results") if isinstance(fix_dispatch, dict) else {}
+        fix_results = (
+            fix_dispatch.get("results") if isinstance(fix_dispatch, dict) else {}
+        )
         if fix_id and isinstance(fix_results, dict):
             fix_res = fix_results.get(fix_id)
-            if isinstance(fix_res, dict) and (fix_res.get("integration") or {}).get("merged"):
+            if isinstance(fix_res, dict) and (fix_res.get("integration") or {}).get(
+                "merged"
+            ):
                 lines.append(f"- `{fix_id}`: LANDED (acceptance-fix child)")
             elif fix_res is not None:
                 lines.append(f"- `{fix_id}`: DROPPED — acceptance-fix did not land")
@@ -710,13 +716,17 @@ def agentic_epic(
         # the PR-sheriff never sees (and can never auto-merge) an incomplete epic.
         epic_branch = ""
         pr_info: dict[str, Any] | None = None
-        extra_kwargs: dict[str, Any] | None = None
+        # Always thread base_branch to children: in non-shared mode it keeps each
+        # child's worktree + PR off ``main`` (against the epic's base branch); in
+        # shared mode the per-child branch_directive takes over, so it is merely
+        # cosmetic there but harmless.
+        extra_kwargs: dict[str, Any] = {"base_branch": base_branch}
         if shared_branch:
             epic_branch = sb.epic_branch_name(epic_id)
             branch_info = sb.create_integration_branch(
                 rig_path_p, epic_id, base_branch=base_branch
             )
-            extra_kwargs = {"epic_branch": epic_branch, "parent_epic_id": epic_id}
+            extra_kwargs |= {"epic_branch": epic_branch, "parent_epic_id": epic_id}
             logger.info(
                 "agentic-epic: shared-branch %s (created=%s) — PR deferred to finalize",
                 epic_branch,

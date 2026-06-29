@@ -98,6 +98,48 @@ def _go_archive(monkeypatch, rig: Path, *, dry_run: bool = False) -> dict:
     )
 
 
+def _worker_ctx(calls: list[dict]) -> dict:
+    """Pull the ctx dict the worker (non-review) step was rendered with."""
+    worker = next(c for c in calls if c.get("step") == "agentic")
+    return dict(worker["ctx"])
+
+
+def test_base_branch_defaults_to_main_in_worker_ctx(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Default: the worker prompt renders against `main` (byte-for-byte unchanged).
+    calls: list[dict] = []
+    closed: list[str] = []
+    monkeypatch.delenv("PO_RESUME", raising=False)
+    monkeypatch.setattr(ag, "agent_step", _fake_agent_step(calls, ["pass"]))
+    _patch_common(monkeypatch, closed)
+    ag.software_dev_agentic.fn(
+        issue_id="seed-1", rig="rig", rig_path=str(tmp_path / "rig"), iter_cap=1
+    )
+    assert _worker_ctx(calls)["base_branch"] == "main"
+
+
+def test_base_branch_threads_custom_value_to_worker_ctx(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `--base-branch <x>` makes the worker cut its worktree + open its PR
+    # against <x>, never `main` — the durable fix for child PRs leaking onto
+    # the deploy branch.
+    calls: list[dict] = []
+    closed: list[str] = []
+    monkeypatch.delenv("PO_RESUME", raising=False)
+    monkeypatch.setattr(ag, "agent_step", _fake_agent_step(calls, ["pass"]))
+    _patch_common(monkeypatch, closed)
+    ag.software_dev_agentic.fn(
+        issue_id="seed-1",
+        rig="rig",
+        rig_path=str(tmp_path / "rig"),
+        iter_cap=1,
+        base_branch="redesign-2026-06-28",
+    )
+    assert _worker_ctx(calls)["base_branch"] == "redesign-2026-06-28"
+
+
 def test_fresh_redispatch_archives_stale_run_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -118,9 +160,7 @@ def test_fresh_redispatch_archives_stale_run_dir(
     assert not (run_dir / "iter-bead-ids.json").exists()  # fresh run_dir is clean
 
 
-def test_resume_keeps_run_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resume_keeps_run_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # PO_RESUME=1 is a real continuation — the run_dir (and its cache) must
     # survive so completed iters are correctly skipped.
     monkeypatch.setenv("PO_RESUME", "1")
@@ -518,7 +558,8 @@ def test_shared_mode_passes_branch_directive_and_integrates(
 
     locked: dict = {}
     monkeypatch.setattr(
-        ag.shared_branch, "ensure_integration_worktree",
+        ag.shared_branch,
+        "ensure_integration_worktree",
         lambda rp, eid: tmp_path / "intwt",
     )
 
@@ -530,22 +571,30 @@ def test_shared_mode_passes_branch_directive_and_integrates(
     monkeypatch.setattr(ag.shared_branch, "integration_lock", fake_lock)
     # PR sheriff and preview stamping must NOT fire in shared mode.
     monkeypatch.setattr(
-        ag, "_dispatch_pr_sheriff",
+        ag,
+        "_dispatch_pr_sheriff",
         lambda *a, **k: pytest.fail("shared mode must not dispatch PR sheriff"),
     )
     monkeypatch.setattr(
-        ag, "_stamp_preview_url",
+        ag,
+        "_stamp_preview_url",
         lambda *a, **k: pytest.fail("shared mode must not stamp a per-child preview"),
     )
 
     result = ag.software_dev_agentic.fn(
-        issue_id="c1", rig="rig", rig_path=str(rig), iter_cap=1,
-        epic_branch="epic/e1", parent_epic_id="e1",
+        issue_id="c1",
+        rig="rig",
+        rig_path=str(rig),
+        iter_cap=1,
+        epic_branch="epic/e1",
+        parent_epic_id="e1",
     )
 
     worker_calls = [c for c in calls if c.get("step") == "agentic"]
     directive = worker_calls[0]["ctx"]["branch_directive"]
-    assert "epic/e1" in directive and "gh pr create" in directive and "NEVER" in directive
+    assert (
+        "epic/e1" in directive and "gh pr create" in directive and "NEVER" in directive
+    )
     # The merge-back ran under the epic lock, in the integration worktree.
     mb = [c for c in calls if c.get("step") == "merge-back"]
     assert len(mb) == 1
@@ -569,15 +618,23 @@ def test_default_mode_directive_empty_and_sheriff_fires(
     monkeypatch.setattr(ag, "agent_step", _fake_agent_step(calls, ["pass"]))
     _patch_common(monkeypatch, closed)
     monkeypatch.setattr(
-        ag.shared_branch, "ensure_integration_worktree",
-        lambda *a, **k: pytest.fail("default mode must not touch the integration worktree"),
+        ag.shared_branch,
+        "ensure_integration_worktree",
+        lambda *a, **k: pytest.fail(
+            "default mode must not touch the integration worktree"
+        ),
     )
     monkeypatch.setattr(ag, "_stamp_preview_url", lambda *a, **k: "")
     sheriff: list[str] = []
-    monkeypatch.setattr(ag, "_dispatch_pr_sheriff", lambda rp, iid, lg: sheriff.append(iid))
+    monkeypatch.setattr(
+        ag, "_dispatch_pr_sheriff", lambda rp, iid, lg: sheriff.append(iid)
+    )
 
     result = ag.software_dev_agentic.fn(
-        issue_id="c2", rig="rig", rig_path=str(rig), iter_cap=1,
+        issue_id="c2",
+        rig="rig",
+        rig_path=str(rig),
+        iter_cap=1,
     )
 
     worker_calls = [c for c in calls if c.get("step") == "agentic"]

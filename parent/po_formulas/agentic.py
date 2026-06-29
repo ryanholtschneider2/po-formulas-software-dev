@@ -304,6 +304,7 @@ def software_dev_agentic(
     parent_bead: str | None = None,
     dry_run: bool = False,
     claim: bool = True,
+    base_branch: str = "main",
     epic_branch: str | None = None,
     parent_epic_id: str | None = None,
 ) -> dict[str, Any]:
@@ -319,6 +320,14 @@ def software_dev_agentic(
     Parameters mirror the ``software_dev_full`` subset that fanout
     dispatchers care about (``issue_id`` / ``rig`` / ``rig_path`` plus
     optional ``parent_bead`` / ``dry_run``).
+
+    ``base_branch`` (default ``"main"``, settable as ``--base-branch`` on
+    ``po run``) is the branch the worker cuts its worktree off and opens its
+    PR *against*. Set it to keep a feature's child PRs off ``main`` — e.g. an
+    integration branch like ``redesign-2026-06-28`` — so nothing reaches the
+    deploy branch until the operator merges the integration branch. It is
+    ignored in shared-branch epic mode (``epic_branch`` set), where the
+    ``branch_directive`` makes the worker branch off the epic tip instead.
 
     **Shared-branch epic mode** (``epic_branch`` set, threaded by
     ``agentic_epic(shared_branch=True)``): the worker is told — via the
@@ -387,6 +396,7 @@ def software_dev_agentic(
                 ctx={
                     "iter": iter_n,
                     "pack_path": str(pack_path_p),
+                    "base_branch": base_branch,
                     "revision_note": _revision_note(fix_list),
                     "preview_note": preview_note,
                     "branch_directive": worker_branch_directive,
@@ -470,7 +480,9 @@ def software_dev_agentic(
                     "reason": "" if merged else "merge-back agent could not integrate",
                 }
                 if merged:
-                    logger.info("agentic: %s merged itself into %s", issue_id, epic_branch)
+                    logger.info(
+                        "agentic: %s merged itself into %s", issue_id, epic_branch
+                    )
                 else:
                     logger.warning(
                         "agentic: %s merge-back failed — acceptance critic will flag the gap",
