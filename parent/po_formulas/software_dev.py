@@ -27,24 +27,24 @@ which downstream steps actually run:
 
 ```
 <seed>                         (the user's issue — claimed in_progress)
-├── <seed>.triage              "complete" (one-shot)
-├── <seed>.baseline            "complete" (one-shot)
-├── <seed>.plan.iter1          "complete"
-├── <seed>.plan-critic.iter1   "approved" | "rejected: …"
-├── <seed>.plan.iter2          (only if iter1 rejected)
-├── <seed>.plan-critic.iter2
-├── <seed>.build.iter1
-├── <seed>.lint.iter1          "clean" | "failed"
-├── <seed>.test-unit.iter1     "passed" | "failed"
-├── <seed>.test-e2e.iter1
-├── <seed>.regression.iter1    "no regression" | "regression: …"
-├── <seed>.review.iter1        "approved" | "rejected"
-├── <seed>.deploy-smoke
-├── <seed>.review-artifacts
-├── <seed>.verify.iter1        "approved" | "rejected"
-├── <seed>.ralph.iter1         "improvement" | "no-improvement"
-├── <seed>.docs
-└── <seed>.learn
+├── <seed>-triage-iter1        "complete" (one-shot)
+├── <seed>-baseline-iter1      "complete" (one-shot)
+├── <seed>-plan-iter1          "complete"
+├── <seed>-plan-critic-iter1   "approved" | "rejected: …"
+├── <seed>-plan-iter2          (only if iter1 rejected)
+├── <seed>-plan-critic-iter2
+├── <seed>-build-iter1
+├── <seed>-lint-iter1          "clean" | "failed"
+├── <seed>-test-unit-iter1     "passed" | "failed"
+├── <seed>-test-e2e-iter1
+├── <seed>-regression-iter1    "no regression" | "regression: …"
+├── <seed>-review-iter1        "approved" | "rejected"
+├── <seed>-deploy-smoke-iter1
+├── <seed>-review-artifacts-iter1
+├── <seed>-verify-iter1        "approved" | "rejected"
+├── <seed>-ralph-iter1         "improvement" | "no-improvement"
+├── <seed>-docs-iter1
+└── <seed>-learn-iter1
 ```
 
 `bd dep tree <seed>` shows the full pipeline post-hoc with verdicts
@@ -71,7 +71,12 @@ from prefect_orchestration.artifact_contract import (
     format_handoff_note,
     write_artifact_manifest,
 )
-from prefect_orchestration.beads_meta import claim_issue, close_issue
+from prefect_orchestration.beads_meta import (
+    claim_issue,
+    close_issue,
+    iter_bead_id,
+    iter_bead_re,
+)
 from prefect_orchestration.context_bundle import build_context_md
 from prefect_orchestration.diff_mapper import (
     compute_changed_files,
@@ -237,7 +242,7 @@ def _read_triage_flags(rig_path: Path, seed_id: str) -> dict[str, Any]:
         from prefect_orchestration.parsing import read_bead_verdict
 
         data = read_bead_verdict(
-            f"{seed_id}.triage.iter1", "triage", rig_path=rig_path
+            iter_bead_id(seed_id, "triage", 1), "triage", rig_path=rig_path
         )
     except (FileNotFoundError, KeyError, ValueError):
         return {"complexity": "complex"}
@@ -384,8 +389,9 @@ def _record_flow_outcome(
         partial_summary = _last_iter_summary(run_dir / "decision-log.md")
 
         # Identify the most recently-touched iter bead under the seed.
-        # Pattern: `<seed>.<step>.iter<N>`. Replaces the legacy scan over
-        # `<run_dir>/verdicts/*.json` (which no longer exists post-migration).
+        # Pattern: `<seed>-<step>-iter<N>` (see `beads_meta.iter_bead_id`).
+        # Replaces the legacy scan over `<run_dir>/verdicts/*.json` (which no
+        # longer exists post-migration).
         terminal_role: str | None = None
         terminal_iter: int | None = None
         try:
@@ -400,19 +406,17 @@ def _record_flow_outcome(
             if qr.returncode == 0 and qr.stdout.strip():
                 rows = json.loads(qr.stdout)
                 if isinstance(rows, list):
+                    iter_re = iter_bead_re(seed_id)
                     iter_beads = [
                         b for b in rows
                         if isinstance(b, dict)
-                        and re.match(rf"^{re.escape(seed_id)}\.(.+?)\.iter(\d+)$", str(b.get("id", "")))
+                        and iter_re.match(str(b.get("id", "")))
                     ]
                     iter_beads.sort(
                         key=lambda b: str(b.get("updated_at", "")), reverse=True,
                     )
                     if iter_beads:
-                        m = re.match(
-                            rf"^{re.escape(seed_id)}\.(.+?)\.iter(\d+)$",
-                            str(iter_beads[0]["id"]),
-                        )
+                        m = iter_re.match(str(iter_beads[0]["id"]))
                         if m:
                             terminal_role = m.group(1) or None
                             terminal_iter = int(m.group(2))
