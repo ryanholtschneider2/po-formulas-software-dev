@@ -37,11 +37,12 @@ cat {{run_dir}}/plan.md 2>/dev/null || true
    (No remote → branch off local `main`. Worktree/branch already exists from a prior iter → reuse it.)
 2. **Plan.** If `{{run_dir}}/plan.md` exists, follow it; otherwise plan the minimal correct change for the issue.
 3. **Build.** Implement it on the `agentic-{{seed_id}}` branch. Write the test alongside the code. Commit logical chunks with messages tying back to `{{seed_id}}`. Stage explicit paths (`git add <path>`), never `git add -A`. Leave the tree clean.
-4. **Run the repo's own tests / CI.** Run whatever the project runs (a `make test` / `make lint` target, the documented `pytest` invocation, an npm/bun script). Tee the output to `{{run_dir}}/gate-tests.txt` so the critic can read the real result:
+4. **Auto-format, then run the repo's own tests / CI.** Format FIRST so format-check drift can't red CI (lint/type passing ≠ format-clean — the classic green-locally-red-in-CI break), then run whatever the project runs. Prefer a single format+validate command if the repo has one (`make ready` in Holtschneider LLC repos); else format then gate. Tee the output to `{{run_dir}}/gate-tests.txt` so the critic can read the real result:
 
    ```bash
    # Example — use the rig's actual commands:
-   make lint test 2>&1 | tee {{run_dir}}/gate-tests.txt \
+   make ready 2>&1 | tee {{run_dir}}/gate-tests.txt \
+     || { make format; make lint test 2>&1 | tee {{run_dir}}/gate-tests.txt; } \
      || uv run python -m pytest tests/ --ignore=tests/e2e --ignore=tests/playwright 2>&1 | tee {{run_dir}}/gate-tests.txt
    ```
 
