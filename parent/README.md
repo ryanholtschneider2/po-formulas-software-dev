@@ -13,8 +13,8 @@ A formula pack for [`prefect-orchestration`](../../prefect-orchestration)
   features, focused bug fixes. See section below.
 - **`software-dev-agentic`** — prompt-driven and minimal. One actor agent
   is told to open a worktree off `main`, implement the feature, run the
-  repo's own tests / CI, and open a PR — looped against one critic that
-  verifies goal accomplishment. See section below.
+  repo's own tests / CI, and open a PR — looped against a design-review
+  critic and then the goal-accomplishment critic. See section below.
 - **`epic`** — reads the open children of a beads epic, builds a Prefect
   DAG from their dependencies, and fans them out as concurrent
   `software-dev-full` sub-flows.
@@ -56,25 +56,30 @@ po run software-dev-agentic \
   --rig-path <path>
 ```
 
-The prompt-over-code variant: essentially **one actor prompt + one
-critic**. The actor agent is prompted (not orchestrator-wired) to open a
+The prompt-over-code variant: essentially **one actor prompt + two focused
+critics**. The actor agent is prompted (not orchestrator-wired) to open a
 worktree off `main`, implement the feature there, run the repo's own
-tests / CI, and **open a PR** when it's done. Then **exactly one critic
-agent** verifies *goal accomplishment* — did the actor implement the
-request faithfully? — and returns `pass` / `fail`. On `fail` the critic
-writes a concrete fix list and the actor iterates against it.
+tests / CI, and **open a PR** when it's done. Then the design-review critic
+checks UI/design diffs for component-system discipline before the
+goal-accomplishment critic verifies whether the actor implemented the request
+faithfully. Either critic can return `fail`; on `fail` it writes a concrete
+fix list and the actor iterates against it.
 
 Pipeline:
 
 ```
-claim seed → loop(actor: worktree → build → test → PR  →  critic: pass | fail) → close
+claim seed → loop(actor: worktree → build → test → PR
+                  → design-review: pass | fail
+                  → goal-review: pass | fail) → close
 ```
 
 There is **no mechanical gate layer**: running tests and opening the PR
-are the actor's job, and the goal-verifying critic is the only gate that
-matters. The flow **never auto-merges** — the actor leaves a PR for human
-review. The seed closes iff the critic passes, and the *flow* (not the
-actor) performs the close (the actor only ever closes its own iter bead).
+are the actor's job. The design-review critic is a focused design-system
+gate for visual work, and the goal-verifying critic remains the final gate
+for request accomplishment. The flow **never auto-merges** — the actor leaves
+a PR for human review. The seed closes iff both critics pass, and the *flow*
+(not the actor) performs the close (the actor only ever closes its own iter
+bead).
 If it doesn't converge within `--iter-cap` iterations the flow raises and
 leaves run-dir artifacts at `<rig>/.planning/software-dev-agentic/<issue>/`
 for forensics.

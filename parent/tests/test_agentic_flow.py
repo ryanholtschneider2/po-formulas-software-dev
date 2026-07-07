@@ -6,7 +6,7 @@ mechanical gate layer. These tests pin the *flow's* close decision:
 
   * the seed closes iff the critic passes,
   * the *flow* (not the actor) performs the close,
-  * a failing critic feeds its fix list back to the actor and iterates,
+  * a failing design-review or goal critic feeds its fix list back to the actor and iterates,
   * non-convergence raises (leaving the seed open) and never merges,
   * a worker exception writes flow_outcome.json and re-raises.
 
@@ -54,6 +54,8 @@ def _fake_agent_step(calls: list[dict], critic_verdicts: list[str]):
         calls.append(dict(kw))
         step = kw.get("step")
         bead = f"{kw['seed_id']}-{step}-iter{kw.get('iter_n')}"
+        if step == "design-review":
+            return AgentStepResult(bead_id=bead, verdict="pass", closed_by="agent")
         if step == "review":
             verdict = seq.pop(0) if seq else "fail"
             return AgentStepResult(bead_id=bead, verdict=verdict, closed_by="agent")
@@ -231,10 +233,12 @@ def test_close_decision_single_iter(
         assert closed == ["seed-1"]
         assert result["critic_verdict"] == "pass"
 
-    # Exactly one actor + one critic call this iter, in that order, with the
-    # pass/fail keyword set — and NO baseline step (it was dropped).
+    # Exactly one actor + design-review + goal critic call this iter, in that
+    # order, with pass/fail keyword sets — and NO baseline step (it was dropped).
     steps = [c.get("step") for c in calls]
-    assert steps == ["agentic", "review"]
+    assert steps == ["agentic", "design-review", "review"]
+    design_calls = [c for c in calls if c.get("step") == "design-review"]
+    assert design_calls[0]["verdict_keywords"] == ("pass", "fail")
     review_calls = [c for c in calls if c.get("step") == "review"]
     assert review_calls[0]["verdict_keywords"] == ("pass", "fail")
 
@@ -256,6 +260,8 @@ def test_critic_fail_then_pass_iterates_and_feeds_fix_list(
         calls.append(dict(kw))
         step = kw.get("step")
         bead = f"{kw['seed_id']}-{step}-iter{kw.get('iter_n')}"
+        if step == "design-review":
+            return AgentStepResult(bead_id=bead, verdict="pass", closed_by="agent")
         if step == "review":
             verdict = seq.pop(0)
             if verdict == "fail":
@@ -281,6 +287,55 @@ def test_critic_fail_then_pass_iterates_and_feeds_fix_list(
     assert "missing error-path test" in worker_calls[1]["ctx"]["revision_note"]
 
 
+def test_design_review_fail_then_pass_iterates_before_goal_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """design fail → design critique → next actor turn gets it → goal reviewer."""
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    run_dir = rig / ".planning" / "software-dev-agentic" / "seed-ds"
+    run_dir.mkdir(parents=True)
+
+    calls: list[dict] = []
+    closed: list[str] = []
+    design_seq = ["fail", "pass"]
+
+    def fake(**kw: object) -> AgentStepResult:
+        calls.append(dict(kw))
+        step = kw.get("step")
+        bead = f"{kw['seed_id']}-{step}-iter{kw.get('iter_n')}"
+        if step == "design-review":
+            verdict = design_seq.pop(0)
+            if verdict == "fail":
+                (run_dir / f"design-critique-iter-{kw.get('iter_n')}.md").write_text(
+                    "1. replace local modal chrome with AppModal"
+                )
+            return AgentStepResult(bead_id=bead, verdict=verdict, closed_by="agent")
+        if step == "review":
+            return AgentStepResult(bead_id=bead, verdict="pass", closed_by="agent")
+        return AgentStepResult(bead_id=bead, verdict="complete", closed_by="agent")
+
+    monkeypatch.setattr(ag, "agent_step", fake)
+    _patch_common(monkeypatch, closed)
+
+    result = ag.software_dev_agentic.fn(
+        issue_id="seed-ds", rig="rig", rig_path=str(rig), iter_cap=2
+    )
+
+    assert result["design_review_verdict"] == "pass"
+    assert result["critic_verdict"] == "pass"
+    assert closed == ["seed-ds"]
+    assert [c.get("step") for c in calls] == [
+        "agentic",
+        "design-review",
+        "agentic",
+        "design-review",
+        "review",
+    ]
+    worker_calls = [c for c in calls if c.get("step") == "agentic"]
+    assert "replace local modal chrome" in worker_calls[1]["ctx"]["revision_note"]
+
+
 def test_no_merge_and_seed_left_open_on_persistent_fail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -299,12 +354,47 @@ def test_no_merge_and_seed_left_open_on_persistent_fail(
             issue_id="seed-r", rig="rig", rig_path=str(rig), iter_cap=2
         )
     assert closed == []
-    # Both iters ran (actor + critic each).
+    # Both iters ran (actor + design-review + goal critic each).
     assert [c.get("step") for c in calls] == [
         "agentic",
+        "design-review",
         "review",
         "agentic",
+        "design-review",
         "review",
+    ]
+
+
+def test_seed_left_open_on_persistent_design_review_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design-review can block before the goal reviewer runs."""
+    calls: list[dict] = []
+    closed: list[str] = []
+
+    def fake(**kw: object) -> AgentStepResult:
+        calls.append(dict(kw))
+        step = kw.get("step")
+        bead = f"{kw['seed_id']}-{step}-iter{kw.get('iter_n')}"
+        if step == "design-review":
+            return AgentStepResult(bead_id=bead, verdict="fail", closed_by="agent")
+        return AgentStepResult(bead_id=bead, verdict="complete", closed_by="agent")
+
+    monkeypatch.setattr(ag, "agent_step", fake)
+    _patch_common(monkeypatch, closed)
+
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    with pytest.raises(RuntimeError, match="design-review=fail"):
+        ag.software_dev_agentic.fn(
+            issue_id="seed-drf", rig="rig", rig_path=str(rig), iter_cap=2
+        )
+    assert closed == []
+    assert [c.get("step") for c in calls] == [
+        "agentic",
+        "design-review",
+        "agentic",
+        "design-review",
     ]
 
 
@@ -324,6 +414,7 @@ def test_dry_run_treats_critic_as_pass_and_closes_nothing(
         issue_id="seed-d", rig="rig", rig_path=str(rig), iter_cap=1, dry_run=True
     )
     assert result["critic_verdict"] == "pass"
+    assert result["design_review_verdict"] == "pass"
     # dry_run skips the real bd close.
     assert closed == []
 

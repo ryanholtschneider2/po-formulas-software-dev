@@ -50,11 +50,13 @@ def test_worker_prompt_has_rigor_scaling_and_pr_checklist() -> None:
     assert "error path" in text
 
 
-def test_worker_prompt_critic_is_the_only_gate() -> None:
+def test_worker_prompt_names_design_and_goal_critics() -> None:
     text = _read("agentic-worker/prompt.md").lower()
-    # The actor must understand the critic verifies goal accomplishment and
-    # is the only gate — there is no separate mechanical checker anymore.
+    # The actor must understand the design-review critic runs before the
+    # goal-accomplishment critic, and that there is no mechanical checker.
     assert "critic" in text
+    assert "design-review critic" in text
+    assert "component-system discipline" in text or "component-system" in text
     assert "goal accomplishment" in text or "accomplish the goal" in text
     raw = _read("agentic-worker/prompt.md")
     assert "{{role_step_bead_id}}" in raw
@@ -71,6 +73,16 @@ def test_worker_task_signals_chosen_mode_and_pr() -> None:
     raw = _read("agentic-worker/task.md")
     assert "{{seed_id}}" in raw and "{{iter}}" in raw
     assert "{{revision_note}}" in raw
+
+
+def test_worker_prompts_component_discipline_evidence() -> None:
+    combined = (
+        _read("agentic-worker/prompt.md") + "\n" + _read("agentic-worker/task.md")
+    ).lower()
+    assert "design-system" in combined
+    assert "component-discipline" in combined
+    assert "quality check" in combined
+    assert "ds-override" in combined
 
 
 # ─────────────────────── critic (reviewer) prompt ───────────────────
@@ -95,6 +107,19 @@ def test_critic_does_not_merge_and_scales_to_ask() -> None:
     text = _read("agentic-reviewer/prompt.md").lower()
     assert "size of the ask" in text or "right-sized" in text
     assert "do not merge" in text or "not merge" in text
+
+
+def test_design_review_critic_prompt_contract() -> None:
+    for rel in ("agentic-design-review/prompt.md", "agentic-design-review/task.md"):
+        text = _read(rel).lower()
+        assert "design-system" in text
+        assert "component-discipline" in text
+        assert "pass" in text and "fail" in text
+        assert "design-critique-iter-" in text
+        assert "evidence" in text
+        assert "component contract" in text
+        assert "docs reference" in text
+        assert "remediation" in text
 
 
 # ─────────────────────── slash command (optional entry point) ────────

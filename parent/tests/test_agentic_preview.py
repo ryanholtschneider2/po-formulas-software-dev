@@ -258,7 +258,7 @@ def test_flow_off_mode_stamps_nothing(
         calls.append(dict(kw))
         step = kw.get("step")
         bead = f"{kw['seed_id']}.{step}.iter{kw.get('iter_n')}"
-        verdict = "pass" if step == "review" else "complete"
+        verdict = "pass" if step in {"design-review", "review"} else "complete"
         return AgentStepResult(bead_id=bead, verdict=verdict, closed_by="agent")
 
     monkeypatch.setattr(ag, "agent_step", fake)

@@ -3,13 +3,15 @@
 A prompt-driven, minimal pipeline: **one actor agent** owns the whole
 implementation loop and is told — in its prompt, not in orchestrator-wired
 Python — to open a worktree off ``main``, implement the feature there, run
-the repo's own tests / CI, and **open a PR** when it's done. Then **exactly
-one critic agent** verifies *goal accomplishment*: did the actor implement
-the requested feature faithfully per the request? If not, the critic returns
-a concrete fix list and the actor iterates (the actor-critic goal loop).
+the repo's own tests / CI, and **open a PR** when it's done. Then a
+design-review critic checks UI component-discipline before the existing
+goal-accomplishment critic verifies whether the actor implemented the
+requested feature faithfully per the request. If either critic fails, it
+returns a concrete fix list and the actor iterates.
 
 There is no mechanical gate layer — running tests and opening the PR are the
-actor's job (prompt-driven), and the critic is the only gate that matters.
+actor's job (prompt-driven), while design-review and goal-review critics are
+the human-style gates that matter.
 The flow does **not** auto-merge: the actor leaves a PR for human review.
 The *flow* (machine) performs the seed close on a critic pass; the actor
 never closes its own seed.
@@ -19,6 +21,7 @@ Pipeline::
     claim seed
       → loop iter in 1..iter_cap:
             agent_step(agentic-worker)   (worktree off main → build → test → PR)
+            agent_step(agentic-design-review) (component discipline: pass | fail)
             agent_step(agentic-reviewer) (goal-accomplishment critic: pass | fail)
             if critic == pass: success
             else: feed the fix list back to the worker and iterate
@@ -308,14 +311,16 @@ def software_dev_agentic(
     epic_branch: str | None = None,
     parent_epic_id: str | None = None,
 ) -> dict[str, Any]:
-    """One prompt-driven actor looped against one goal-verifying critic.
+    """One prompt-driven actor looped against design + goal critics.
 
     The worker agent is prompted to work in a worktree off ``main``, run the
     repo's own tests / CI, and open a PR (none of which is orchestrator-wired
-    code). The critic then verifies that the change faithfully accomplishes
-    the request and returns ``pass`` / ``fail`` (with a concrete fix list on
-    fail). The seed closes iff the critic passes — and the flow, never the
-    worker, performs the close. The flow never merges to ``main``.
+    code). The design-review critic then verifies component-discipline for
+    UI/design diffs before the goal critic verifies that the change faithfully
+    accomplishes the request. Each critic returns ``pass`` / ``fail`` (with a
+    concrete fix list on fail). The seed closes iff both critics pass — and
+    the flow, never the worker, performs the close. The flow never merges to
+    ``main``.
 
     Parameters mirror the ``software_dev_full`` subset that fanout
     dispatchers care about (``issue_id`` / ``rig`` / ``rig_path`` plus
@@ -382,6 +387,7 @@ def software_dev_agentic(
 
     try:
         critic_verdict = ""
+        design_review_verdict = ""
         fix_list = ""
         success = False
         for iter_n in range(1, iter_cap + 1):
@@ -407,6 +413,31 @@ def software_dev_agentic(
             logger.info(
                 "agentic: worker iter %s closed_by=%s", iter_n, worker.closed_by
             )
+
+            design_review = agent_step(
+                agent_dir=_AGENTS_DIR / "agentic-design-review",
+                task=_AGENTS_DIR / "agentic-design-review" / "task.md",
+                seed_id=issue_id,
+                rig_path=str(rig_path_p),
+                run_dir=run_dir,
+                step="design-review",
+                iter_n=iter_n,
+                ctx={"iter": iter_n, "pack_path": str(pack_path_p)},
+                verdict_keywords=("pass", "fail"),
+                dry_run=dry_run,
+            )
+            design_review_verdict = design_review.verdict
+            if dry_run:
+                design_review_verdict = "pass"
+            logger.info(
+                "agentic: iter %s design-review=%s",
+                iter_n,
+                design_review_verdict,
+            )
+
+            if design_review_verdict != "pass":
+                fix_list = _read_text(run_dir / f"design-critique-iter-{iter_n}.md")
+                continue
 
             review = agent_step(
                 agent_dir=_AGENTS_DIR / "agentic-reviewer",
@@ -440,6 +471,8 @@ def software_dev_agentic(
             # (critiques, diffs, sessions) stay for `po retry` / inspection.
             raise RuntimeError(
                 f"software-dev-agentic: did not converge after {iter_cap} iter(s) — "
+                "design-review="
+                f"{design_review_verdict or '(no verdict)'}, "
                 f"critic={critic_verdict or '(no verdict)'}"
             )
 
@@ -520,6 +553,7 @@ def software_dev_agentic(
         return {
             "status": "completed",
             "critic_verdict": critic_verdict,
+            "design_review_verdict": design_review_verdict,
             "preview_url": preview_url,
             "integration": integration,
         }

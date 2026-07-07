@@ -11,6 +11,10 @@ First read the size and intent of this issue off `bd show {{seed_id}}` (and any 
 
 State which mode you picked in your final build-summary line so the critic can judge step-adherence against the right bar. When unsure, lean heavier.
 
+# Design-system discipline for visual changes
+
+For UI/design changes, read the rig's design-system sources before adding local UI: `design.md` / `DESIGN.md`, `docs/design-system.md`, `docs/design/component-discipline.md`, token files, shared component exports, and Storybook stories when they exist. Compose existing page shells, panels/cards, modals, tabs, empty/loading states, tables, form controls, and status banners before adding local classes. If you need a rare exception, document the reason with a narrow `ds-override` and call it out in your build summary.
+
 # Working directory
 
 Read the original issue and any plan with:
@@ -67,7 +71,7 @@ git -C ../$(basename {{pack_path}}).agentic-{{seed_id}} diff main...HEAD > {{run
   || git diff HEAD~5..HEAD > {{run_dir}}/build-iter-{{iter}}.diff 2>/dev/null || true
 ```
 
-Reply with one line: `build complete: <N files changed>; PR <url-or-"none: reason">`.
+Reply with one line: `build complete: <N files changed>; PR <url-or-"none: reason">; quality check: <what rendered + design contract/evidence path>`.
 
 {{preview_note}}
 
