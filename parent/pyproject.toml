@@ -55,9 +55,10 @@ packages = ["po_formulas"]
 #   po run epic --epic-id <id> --rig <name> --rig-path <path>
 
 [tool.uv.sources]
-# Path is relative to this pyproject.toml. Works when this repo is
-# cloned as a sibling of prefect-orchestration (canonical layout).
-prefect-orchestration = { path = "../../prefect-orchestration", editable = true }
+# bd-2nphd depends on the role_registry target-pack metadata compatibility
+# shipped on this core branch; keep the pack branch reproducible until both
+# branches land.
+prefect-orchestration = { git = "ssh://git@github.com/ryanholtschneider2/prefect-agent-orchestration.git", branch = "agentic-bd-2nphd" }
 
 [dependency-groups]
 dev = [
