@@ -29,7 +29,7 @@ def test_explicit_pack_path_wins_over_metadata(
         out = json.dumps([{"metadata": {"po.target_pack": str(md_target)}}])
         return type("P", (), {"returncode": 0, "stdout": out, "stderr": ""})()
 
-    monkeypatch.setattr(sd_mod.shutil, "which", lambda _: "/usr/bin/bd")
+    monkeypatch.setattr(sd_mod, "_metadata_binary", lambda _: "bd")
     monkeypatch.setattr(sd_mod.subprocess, "run", fake_run)
 
     got = _resolve_pack_path(str(explicit), "x-1", rig)
@@ -48,7 +48,7 @@ def test_bd_metadata_overrides_rig_path_default(
         out = json.dumps([{"metadata": {"po.target_pack": str(md_target)}}])
         return type("P", (), {"returncode": 0, "stdout": out, "stderr": ""})()
 
-    monkeypatch.setattr(sd_mod.shutil, "which", lambda _: "/usr/bin/bd")
+    monkeypatch.setattr(sd_mod, "_metadata_binary", lambda _: "bd")
     monkeypatch.setattr(sd_mod.subprocess, "run", fake_run)
 
     got = _resolve_pack_path(None, "x-1", rig)
@@ -65,7 +65,7 @@ def test_falls_back_to_rig_path_when_neither_set(
         out = json.dumps([{"metadata": {}}])
         return type("P", (), {"returncode": 0, "stdout": out, "stderr": ""})()
 
-    monkeypatch.setattr(sd_mod.shutil, "which", lambda _: "/usr/bin/bd")
+    monkeypatch.setattr(sd_mod, "_metadata_binary", lambda _: "bd")
     monkeypatch.setattr(sd_mod.subprocess, "run", fake_run)
 
     got = _resolve_pack_path(None, "x-1", rig)
@@ -77,6 +77,6 @@ def test_falls_back_when_bd_missing(
 ) -> None:
     rig = tmp_path / "rig"
     rig.mkdir()
-    monkeypatch.setattr(sd_mod.shutil, "which", lambda _: None)
+    monkeypatch.setattr(sd_mod, "_metadata_binary", lambda _: None)
     got = _resolve_pack_path(None, "x-1", rig)
     assert got == rig
