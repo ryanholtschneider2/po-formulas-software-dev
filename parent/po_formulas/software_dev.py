@@ -408,12 +408,13 @@ def _record_flow_outcome(
                 if isinstance(rows, list):
                     iter_re = iter_bead_re(seed_id)
                     iter_beads = [
-                        b for b in rows
-                        if isinstance(b, dict)
-                        and iter_re.match(str(b.get("id", "")))
+                        b
+                        for b in rows
+                        if isinstance(b, dict) and iter_re.match(str(b.get("id", "")))
                     ]
                     iter_beads.sort(
-                        key=lambda b: str(b.get("updated_at", "")), reverse=True,
+                        key=lambda b: str(b.get("updated_at", "")),
+                        reverse=True,
                     )
                     if iter_beads:
                         m = iter_re.match(str(iter_beads[0]["id"]))
@@ -655,6 +656,7 @@ def software_dev_full(
         plan_iter_final = 1
         prior_plan_critique = ""
         prior_plan_critic_bead = ""
+        plan_approved = not run_critics
         if not run_critics:
             # Single plan, no critic.
             _agent_step_task(
@@ -695,15 +697,14 @@ def software_dev_full(
                     dry_run=dry_run,
                 )
                 if critic_result.verdict == "approved":
+                    plan_approved = True
                     break
                 prior_plan_critique = critic_result.summary or "(no summary captured)"
                 prior_plan_critic_bead = critic_result.bead_id
-                if plan_iter >= plan_iter_cap:
-                    logger.warning(
-                        "plan_iter_cap=%s reached without approval; proceeding with last plan",
-                        plan_iter_cap,
-                    )
-                    break
+        if not dry_run and not plan_approved:
+            raise RuntimeError(
+                f"plan review did not approve after {plan_iter_cap} iteration(s)"
+            )
 
         # 4. Build + lint/test fan-out + review loop.
         # Verdict-self-containment: on iter2+ pass prior build-critic
@@ -715,6 +716,7 @@ def software_dev_full(
         build_iter_final = 1
         prior_build_critique = ""
         prior_build_critic_bead = ""
+        build_approved = not run_critics
         for build_iter in range(1, iter_cap + 1):
             build_iter_final = build_iter
             _agent_step_task(
@@ -848,18 +850,18 @@ def software_dev_full(
                     dry_run=dry_run,
                 )
                 if review_result.verdict == "approved":
+                    build_approved = True
                     break
                 prior_build_critique = review_result.summary or "(no summary captured)"
                 prior_build_critic_bead = review_result.bead_id
-                if build_iter >= iter_cap:
-                    logger.warning(
-                        "iter_cap=%s reached without review approval; proceeding",
-                        iter_cap,
-                    )
-                    break
             else:
                 # Simple complexity — single build pass, no critic loop.
                 break
+
+        if not dry_run and not build_approved:
+            raise RuntimeError(
+                f"build review did not approve after {iter_cap} iteration(s)"
+            )
 
         # 5-8 are complex-only.
         verify_iter_final = 1
@@ -888,6 +890,7 @@ def software_dev_full(
             )
 
             # 6. Verifier loop.
+            verification_approved = False
             for verify_iter in range(1, verify_iter_cap + 1):
                 verify_iter_final = verify_iter
                 v = _agent_step_task(
@@ -902,7 +905,12 @@ def software_dev_full(
                     dry_run=dry_run,
                 )
                 if v.verdict == "approved":
+                    verification_approved = True
                     break
+            if not dry_run and not verification_approved:
+                raise RuntimeError(
+                    f"verification did not approve after {verify_iter_cap} iteration(s)"
+                )
 
             # 7. Ralph cleanup — improvements only, bounded.
             for ralph_iter in range(1, ralph_iter_cap + 1):
@@ -922,6 +930,7 @@ def software_dev_full(
                     break
 
             # 8. Final full-test gate (one-shot; failure → bounded ralph fix-up).
+            gate_passed = False
             for gate_iter in range(1, gate_iter_cap + 1):
                 gate_iter_final = gate_iter
                 g = _agent_step_task(
@@ -936,6 +945,7 @@ def software_dev_full(
                     dry_run=dry_run,
                 )
                 if g.verdict == "passed":
+                    gate_passed = True
                     break
                 ralph_iter_final += 1
                 _agent_step_task(
@@ -950,6 +960,10 @@ def software_dev_full(
                         "gate_failures_block": g.summary,
                     },
                     dry_run=dry_run,
+                )
+            if not dry_run and not gate_passed:
+                raise RuntimeError(
+                    f"full-test gate did not pass after {gate_iter_cap} iteration(s)"
                 )
 
         # 9. Docs + demo-video (UI only) + learn — gated by complexity.
