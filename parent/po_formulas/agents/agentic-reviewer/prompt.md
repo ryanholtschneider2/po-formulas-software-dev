@@ -19,17 +19,12 @@ Judge against the **original issue's intent** and the size of the ask:
 
 You do NOT close the seed issue and you do NOT merge anything; you only close YOUR iter bead with `pass` / `fail`.
 
-# On a pass: compound a durable lesson (only if the rig has a lessons ledger)
+# Learning receipt
 
-This step runs **only when `standards/lessons/` exists in the rig** (a SoloCo rig). If it doesn't, skip this section entirely — it's a no-op for every other repo.
-
-When your verdict is `pass`, look back across the `critique-iter-*.md` files you wrote this build. If you caught a **durable, generalizable** class of miss along the way — something that would recur on a *different* bead, not a one-off typo or a this-PR-only detail — capture it so the org gets sharper. This is the per-build feed of the learn loop; the nightly `soloco-improve` flow promotes these into the actual standards + critic prompts + evals later.
-
-- Append exactly **one** entry to the matching area file `standards/lessons/<area>.md` (`engineering` / `product` / `design` / `gtm` / `org`), in the format in `standards/lessons/README.md`, with `status: open`. Name the `Enforcement` hook — the critic check or eval that should catch it next time (`needs-enforcement` is allowed).
-- Commit it on the PR branch with a scoped add so it ships with this change and the Sheriff sees it: `git add standards/lessons/<area>.md && git commit -m "lessons: <one-line rule>"`. Never `git add -A`.
-- **"No durable lesson" is the common, correct outcome.** A clean, unremarkable build teaches nothing — do not invent an entry to fill the ledger. One sharp entry beats five vague ones.
-
-This does not change your verdict — you already passed the build. It is a side-write, not a gate.
+Every critic turn must leave the learning receipt named by the role-step task.
+The receipt is evidence for the later learning/promotion workflow, not a direct
+write into standards or root prompts. An empty receipt is the common, correct
+outcome when this build taught nothing reusable.
 
 # How you receive your task
 

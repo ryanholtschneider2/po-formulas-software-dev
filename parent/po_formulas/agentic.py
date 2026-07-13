@@ -191,6 +191,7 @@ def _dispatch_provenance(
 # a critic pass and stamps `po.preview_url`. Verdict-file pattern — never
 # parse the agent's reply text.
 _PREVIEW_URL_FILE = "preview_url.txt"
+_LEARNING_RECEIPT_FILE = "learning-receipt.md"
 _VALID_PREVIEW_MODES = ("local", "cloud", "off")
 _VALID_PROOF_MODES = ("adaptive", "strict")
 _TRUTHY = ("1", "true", "yes", "on")
@@ -756,6 +757,8 @@ def software_dev_agentic(
                     patch["preview"] = preview_evidence
                 verified_delivery.update(run_dir, patch)
 
+            learning_receipt = run_dir / _LEARNING_RECEIPT_FILE
+            learning_receipt.unlink(missing_ok=True)
             review = agent_step(
                 agent_dir=_AGENTS_DIR / "agentic-reviewer",
                 task=_AGENTS_DIR / "agentic-reviewer" / "task.md",
@@ -773,8 +776,14 @@ def software_dev_agentic(
                         verified_delivery.artifact_path(run_dir)
                     ),
                     "branch_truth": json.dumps(branch_evidence, sort_keys=True),
+                    "learning_receipt_path": str(learning_receipt),
                 },
                 verdict_keywords=("pass", "fail"),
+                required_artifacts=(_LEARNING_RECEIPT_FILE,),
+                artifact_nudge=(
+                    f"Complete the learning receipt at {learning_receipt}. "
+                    "Create an empty file if there are no reusable lessons."
+                ),
                 dry_run=dry_run,
             )
             critic_verdict = review.verdict

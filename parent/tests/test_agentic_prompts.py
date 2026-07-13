@@ -97,6 +97,16 @@ def test_critic_does_not_merge_and_scales_to_ask() -> None:
     assert "do not merge" in text or "not merge" in text
 
 
+def test_critic_learning_receipt_contract() -> None:
+    task = _read("agentic-reviewer/task.md")
+    prompt = _read("agentic-reviewer/prompt.md")
+    assert "{{learning_receipt_path}}" in task
+    assert "create the file empty" in task.lower()
+    assert "project`, `user`, or `engine`" in task
+    assert "do not update `agents.md`" in task.lower()
+    assert "every critic turn" in prompt.lower()
+
+
 # ─────────────────────── slash command (optional entry point) ────────
 
 

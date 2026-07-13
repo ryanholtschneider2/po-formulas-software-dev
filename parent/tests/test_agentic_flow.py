@@ -265,6 +265,11 @@ def test_close_decision_single_iter(
     assert steps == ["sizing", "agentic", "review"]
     review_calls = [c for c in calls if c.get("step") == "review"]
     assert review_calls[0]["verdict_keywords"] == ("pass", "fail")
+    assert review_calls[0]["required_artifacts"] == ("learning-receipt.md",)
+    assert "Complete the learning receipt" in review_calls[0]["artifact_nudge"]
+    assert review_calls[0]["ctx"]["learning_receipt_path"].endswith(
+        "/learning-receipt.md"
+    )
 
 
 def test_critic_fail_then_pass_iterates_and_feeds_fix_list(

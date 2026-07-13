@@ -31,6 +31,21 @@ If the diff artifact is missing, read the committed change directly — inspect 
 
 You do NOT close the seed and you do NOT merge anything; you only close YOUR iter bead.
 
+# Learning receipt (required on PASS or FAIL)
+
+Before closing your iter bead, create `{{learning_receipt_path}}`.
+
+- If this build produced no durable, reusable lesson, create the file empty.
+- Otherwise write concise Markdown with: the lesson, evidence from this build,
+  recommended scope (`project`, `user`, or `engine`), and the standard, skill,
+  prompt, or eval that should eventually absorb it.
+- Do not update `AGENTS.md`, `CLAUDE.md`, skills, or standards directly here.
+  This receipt is evidence for the learning/promotion workflow.
+- Do not invent a lesson merely to make the file non-empty.
+
+A missing file means your role is incomplete. An existing empty file explicitly
+means “no lessons.”
+
 Reply with one line: `review: <PASS|FAIL> — <one-line rationale>`.
 
 {{role_step_close_block}}
