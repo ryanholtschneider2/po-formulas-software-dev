@@ -198,6 +198,13 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, closed: list[str]) -> None:
     monkeypatch.setattr(ag, "claim_issue", lambda *a, **kw: None)
     monkeypatch.setattr(ag, "close_issue", lambda iid, *a, **kw: closed.append(iid))
     monkeypatch.setattr(
+        ag.agentic_sizing,
+        "read_sizing",
+        lambda run_dir: ag.agentic_sizing.SizingDecision(
+            "proceed", "small", "low", ("preview",), 1, "Scoped work.", ""
+        ),
+    )
+    monkeypatch.setattr(
         ag.delivery_truth,
         "branch_truth",
         lambda repo, *, branch, base_branch: {

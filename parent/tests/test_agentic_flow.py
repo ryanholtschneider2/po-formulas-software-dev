@@ -69,6 +69,13 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, closed: list[str]) -> None:
     monkeypatch.setattr(ag, "claim_issue", lambda *a, **kw: None)
     monkeypatch.setattr(ag, "close_issue", lambda iid, *a, **kw: closed.append(iid))
     monkeypatch.setattr(
+        ag.agentic_sizing,
+        "read_sizing",
+        lambda run_dir: ag.agentic_sizing.SizingDecision(
+            "proceed", "small", "low", ("tests",), 2, "Scoped work.", ""
+        ),
+    )
+    monkeypatch.setattr(
         ag.delivery_truth,
         "branch_truth",
         lambda *a, **kw: {
@@ -255,7 +262,7 @@ def test_close_decision_single_iter(
     # Exactly one actor + one critic call this iter, in that order, with the
     # pass/fail keyword set — and NO baseline step (it was dropped).
     steps = [c.get("step") for c in calls]
-    assert steps == ["agentic", "review"]
+    assert steps == ["sizing", "agentic", "review"]
     review_calls = [c for c in calls if c.get("step") == "review"]
     assert review_calls[0]["verdict_keywords"] == ("pass", "fail")
 
@@ -322,6 +329,7 @@ def test_no_merge_and_seed_left_open_on_persistent_fail(
     assert closed == []
     # Both iters ran (actor + critic each).
     assert [c.get("step") for c in calls] == [
+        "sizing",
         "agentic",
         "review",
         "agentic",
@@ -419,6 +427,13 @@ def test_flow_outcome_written_on_worker_exception(
     monkeypatch.setattr(ag, "get_run_logger", lambda: _NULL_LOGGER)
     monkeypatch.setattr(ag, "claim_issue", lambda *a, **kw: None)
     monkeypatch.setattr(ag, "close_issue", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        ag.agentic_sizing,
+        "read_sizing",
+        lambda run_dir: ag.agentic_sizing.SizingDecision(
+            "proceed", "small", "low", ("worker",), 1, "Scoped work.", ""
+        ),
+    )
 
     rig = tmp_path / "rig"
     rig.mkdir()

@@ -58,6 +58,7 @@ from prefect_orchestration.beads_meta import claim_issue, close_issue
 from po_formulas import shared_branch
 from po_formulas import delivery_truth
 from po_formulas import verified_delivery
+from po_formulas import agentic_sizing
 from po_formulas.software_dev import (
     _load_rig_env,
     _record_flow_outcome,
@@ -275,6 +276,31 @@ def _bd_set_metadata(issue_id: str, key: str, value: str, rig_path: Path) -> Non
         )
 
 
+def _bd_add_label(issue_id: str, label: str, rig_path: Path) -> None:
+    """Add a portable audit label to a bead (best-effort transport)."""
+    subprocess.run(
+        ["bd", "update", issue_id, "--add-label", label],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=str(rig_path),
+    )
+
+
+def _record_sizing_labels(
+    issue_id: str,
+    decision: agentic_sizing.SizingDecision,
+    rig_path: Path,
+) -> None:
+    for label in (
+        f"po_size:{decision.size}",
+        f"po_risk:{decision.risk}",
+        f"po_sizing_decision:{decision.decision}",
+        f"po_iteration_budget:{decision.iteration_budget}",
+    ):
+        _bd_add_label(issue_id, label, rig_path)
+
+
 def _dispatch_pr_sheriff(rig_path: Path, issue_id: str, logger: Any) -> None:
     """Fire the workspace's pr-sheriff deployment for this PR (best-effort).
 
@@ -358,7 +384,7 @@ def software_dev_agentic(
     rig: str,
     rig_path: str,
     pack_path: str | None = None,
-    iter_cap: int = 2,
+    iter_cap: int | None = None,
     parent_bead: str | None = None,
     dry_run: bool = False,
     claim: bool = True,
@@ -368,7 +394,9 @@ def software_dev_agentic(
 ) -> dict[str, Any]:
     """One prompt-driven actor looped against one goal-verifying critic.
 
-    The worker agent is prompted to work in a worktree off ``main``, run the
+    A sizing agent first judges whether the seed is one PR-sized unit and
+    selects a bounded actor/critic budget. The worker agent is then prompted to
+    work in a worktree off ``main``, run the
     repo's own tests / CI, and open a PR (none of which is orchestrator-wired
     code). The critic then verifies that the change faithfully accomplishes
     the request and returns ``pass`` / ``fail`` (with a concrete fix list on
@@ -452,10 +480,68 @@ def software_dev_agentic(
     )
 
     try:
+        sizing_step = agent_step(
+            agent_dir=_AGENTS_DIR / "agentic-sizer",
+            task=_AGENTS_DIR / "agentic-sizer" / "task.md",
+            seed_id=issue_id,
+            rig_path=str(rig_path_p),
+            run_dir=run_dir,
+            step="sizing",
+            iter_n=1,
+            ctx={"pack_path": str(pack_path_p)},
+            verdict_keywords=("proceed", "decompose", "failed"),
+            dry_run=dry_run,
+        )
+        if dry_run and not (run_dir / agentic_sizing.SIZING_FILE).exists():
+            # StubBackend exercises the real flow topology but cannot author an
+            # artifact. Supply a clearly synthetic, structurally valid record.
+            (run_dir / agentic_sizing.SIZING_FILE).write_text(
+                json.dumps(
+                    {
+                        "decision": "proceed",
+                        "size": "small",
+                        "risk": "low",
+                        "surfaces": ["dry-run topology"],
+                        "iteration_budget": 1,
+                        "rationale": "Synthetic dry-run sizing judgment.",
+                        "decomposition_reason": "",
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+        sizing = agentic_sizing.apply_operator_cap(
+            agentic_sizing.read_sizing(run_dir), iter_cap
+        )
+        logger.info(
+            "agentic: sizing decision=%s size=%s risk=%s budget=%s closed_by=%s",
+            sizing.decision,
+            sizing.size,
+            sizing.risk,
+            sizing.iteration_budget,
+            sizing_step.closed_by,
+        )
+        if not dry_run:
+            _record_sizing_labels(issue_id, sizing, rig_path_p)
+        verified_delivery.update(
+            run_dir,
+            {
+                "sizing": {
+                    **sizing.as_dict(),
+                    "operator_iter_cap": iter_cap,
+                    "provenance": provenance,
+                }
+            },
+        )
+        if sizing.decision == "decompose":
+            raise agentic_sizing.DecompositionRequiredError(
+                agentic_sizing.decomposition_message(issue_id, sizing)
+            )
+
         critic_verdict = ""
         fix_list = ""
         success = False
-        for iter_n in range(1, iter_cap + 1):
+        for iter_n in range(1, sizing.iteration_budget + 1):
             worker = agent_step(
                 agent_dir=_AGENTS_DIR / "agentic-worker",
                 task=_AGENTS_DIR / "agentic-worker" / "task.md",
@@ -577,7 +663,8 @@ def software_dev_agentic(
             # Leave the seed open and raise for forensics — run_dir artifacts
             # (critiques, diffs, sessions) stay for `po retry` / inspection.
             raise RuntimeError(
-                f"software-dev-agentic: did not converge after {iter_cap} iter(s) — "
+                "software-dev-agentic: did not converge after "
+                f"{sizing.iteration_budget} iter(s) — "
                 f"critic={critic_verdict or '(no verdict)'}"
             )
 
@@ -693,7 +780,16 @@ def software_dev_agentic(
                             pack_path_p, shared_branch.child_branch_name(issue_id)
                         )
                     },
-                    "terminal": {"state": "failed", "reason": str(exc)},
+                    "terminal": {
+                        "state": (
+                            "rejected"
+                            if isinstance(
+                                exc, agentic_sizing.DecompositionRequiredError
+                            )
+                            else "failed"
+                        ),
+                        "reason": str(exc),
+                    },
                 },
             )
         except Exception as artifact_exc:  # noqa: BLE001 — preserve flow failure

@@ -624,7 +624,7 @@ def agentic_epic(
     rig_path: str,
     pack_path: str | None = None,
     plan_iter_cap: int = 2,
-    iter_cap: int = 2,
+    iter_cap: int = 4,
     max_children: int = 12,
     dry_run: bool = False,
     shared_branch: bool = True,

@@ -26,6 +26,13 @@ def _patch_flow(monkeypatch: pytest.MonkeyPatch, *, worker_error: bool = False) 
     monkeypatch.setattr(ag, "get_run_logger", lambda: _LOGGER)
     monkeypatch.setattr(ag, "claim_issue", lambda *args, **kwargs: None)
     monkeypatch.setattr(ag, "close_issue", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ag.agentic_sizing,
+        "read_sizing",
+        lambda run_dir: ag.agentic_sizing.SizingDecision(
+            "proceed", "small", "low", ("delivery",), 1, "Scoped work.", ""
+        ),
+    )
     monkeypatch.setattr(ag, "_dispatch_pr_sheriff", lambda *args, **kwargs: None)
     monkeypatch.setattr(ag, "_tag_flow_run_with_issue_id", lambda *args: None)
     monkeypatch.setattr(

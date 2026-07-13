@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "trivial-doc-fix",
+      "goal": "Correct one broken README link and verify it resolves.",
+      "expected_decision": "proceed",
+      "expected_size": ["trivial", "small"],
+      "expected_budget": [1],
+      "why": "Trivial work must remain fast rather than inheriting a fixed two-pass loop."
+    },
+    {
+      "id": "courtpro-full-product-rebuild",
+      "goal": "Rebuild CourtPro end to end across account onboarding, organization setup, case intake, document workflows, billing, responsive UI, and production acceptance in one bead.",
+      "expected_decision": "decompose",
+      "expected_size": ["oversized"],
+      "expected_budget": [1, 2, 3, 4],
+      "why": "Independent product surfaces require separate PR-sized implementation and acceptance proof."
+    },
+    {
+      "id": "storybook-owner-journey-rebuild",
+      "goal": "Finish the full Storybook owner journey across cited onboarding, text and voice agent behavior, full-book generation, editor review, commerce, and publishing in one run.",
+      "expected_decision": "decompose",
+      "expected_size": ["oversized"],
+      "expected_budget": [1, 2, 3, 4],
+      "why": "The known owner-journey failure spans multiple independently verifiable product surfaces."
+    }
+  ]
+}
