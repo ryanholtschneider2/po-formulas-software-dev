@@ -2,6 +2,8 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
+For learning receipts and promotion scope, read `standards/learnings/README.md`.
+
 ## Quick Reference
 
 ```bash
