@@ -56,18 +56,27 @@ po run software-dev-agentic \
   --rig-path <path>
 ```
 
-The prompt-over-code variant: essentially **one actor prompt + one
-critic**. The actor agent is prompted (not orchestrator-wired) to open a
+The prompt-over-code variant starts with a **structured sizing judgment**, then
+runs essentially **one actor prompt + one critic**. The sizing agent reads the
+actual bead and relevant code context, writes an auditable `sizing.json`, and
+chooses whether the work is one PR-sized unit plus a bounded 1–4 iteration
+budget. The actor agent is prompted (not orchestrator-wired) to open a
 worktree off `main`, implement the feature there, run the repo's own
 tests / CI, and **open a PR** when it's done. Then **exactly one critic
 agent** verifies *goal accomplishment* — did the actor implement the
 request faithfully? — and returns `pass` / `fail`. On `fail` the critic
 writes a concrete fix list and the actor iterates against it.
 
+Oversized multi-surface goals are refused before the worker starts. The error
+points the operator to `po run agentic-epic`, whose planner can turn the goal
+into PR-sized children. This is model judgment rather than keyword, file-count,
+or scoring logic in Python; code only validates the JSON shape and enforces the
+declared budget boundary.
+
 Pipeline:
 
 ```
-claim seed → loop(actor: worktree → build → test → PR  →  critic: pass | fail) → close
+sizing: proceed + budget | decompose → loop(actor: worktree → build → test → PR  →  critic: pass | fail) → close
 ```
 
 There is **no mechanical gate layer**: running tests and opening the PR
@@ -75,7 +84,7 @@ are the actor's job, and the goal-verifying critic is the only gate that
 matters. The flow **never auto-merges** — the actor leaves a PR for human
 review. The seed closes iff the critic passes, and the *flow* (not the
 actor) performs the close (the actor only ever closes its own iter bead).
-If it doesn't converge within `--iter-cap` iterations the flow raises and
+If it doesn't converge within the selected budget the flow raises and
 leaves run-dir artifacts at `<rig>/.planning/software-dev-agentic/<issue>/`
 for forensics.
 
@@ -123,8 +132,15 @@ epic's requested target.
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--iter-cap N` | `2` | Max actor→critic iterations before failing loud. |
+| `--iter-cap N` | adaptive | Optional operator ceiling on the model-selected 1–4 actor→critic budget. |
 | `--pack-path <path>` | `rig-path` | Code root the actor opens its worktree in, when the repo under test differs from the rig root. |
+
+The sizing evidence is stored at
+`<rig>/.planning/software-dev-agentic/<issue>/sizing.json`, copied with dispatch
+provenance into `verified-delivery.json`, and summarized on portable bead labels
+(`po_size:*`, `po_risk:*`, `po_sizing_decision:*`, and
+`po_iteration_budget:*`). A `decompose` result leaves the seed open and records
+terminal state `rejected`; it does not consume worker iterations.
 
 **Use when:** you want the agent to own the whole loop — including the
 worktree and the PR — judged only on whether it accomplished the goal,
