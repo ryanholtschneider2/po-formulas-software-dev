@@ -404,6 +404,41 @@ def _record_proof_result(run_dir: Path, *, step: str, iter_n: int, result: Any) 
     verified_delivery.update(run_dir, patch)
 
 
+def _clear_demo_evidence(run_dir: Path) -> None:
+    """Remove prior demo bytes so a retry must prove the current iteration."""
+    (run_dir / "demo.mp4").unlink(missing_ok=True)
+    (run_dir / "review-artifacts" / "demo.mp4").unlink(missing_ok=True)
+
+
+def _demo_evidence_failure(
+    run_dir: Path, *, verdict: str = "", error: Exception | None = None
+) -> str:
+    """Return a concrete revision note when required demo proof is absent."""
+    if error is not None:
+        return (
+            "Required UI demo proof failed to run: "
+            f"{error}. Fix the demo/runtime failure and produce a non-empty "
+            f"{run_dir / 'review-artifacts' / 'demo.mp4'}."
+        )
+    demo_path = run_dir / "review-artifacts" / "demo.mp4"
+    if verdict != "recorded":
+        return (
+            f"Required UI demo proof returned {verdict or 'no verdict'} instead "
+            f"of recorded. Produce a non-empty current demo at {demo_path}."
+        )
+    try:
+        has_bytes = demo_path.stat().st_size > 0
+    except OSError:
+        has_bytes = False
+    if has_bytes:
+        return ""
+    return (
+        "Required UI demo proof was skipped or missing. Produce a non-empty "
+        f"demo for the current iteration at {demo_path}; stale evidence from "
+        "an earlier iteration does not count."
+    )
+
+
 # ─────────────────────── flow ───────────────────────────────────────
 
 
@@ -710,20 +745,39 @@ def software_dev_agentic(
                     run_dir, step="deploy-smoke", iter_n=iter_n, result=smoke
                 )
             if delivery_plan.demo:
-                demo = agent_step(
-                    agent_dir=_AGENTS_DIR / "demo-video",
-                    task=_AGENTS_DIR / "demo-video" / "task.md",
-                    seed_id=issue_id,
-                    rig_path=str(rig_path_p),
-                    run_dir=run_dir,
-                    step="demo-video",
-                    iter_n=iter_n,
-                    ctx={"issue_id": issue_id},
-                    dry_run=dry_run,
+                _clear_demo_evidence(run_dir)
+                demo_error: Exception | None = None
+                try:
+                    demo = agent_step(
+                        agent_dir=_AGENTS_DIR / "demo-video",
+                        task=_AGENTS_DIR / "demo-video" / "task.md",
+                        seed_id=issue_id,
+                        rig_path=str(rig_path_p),
+                        run_dir=run_dir,
+                        step="demo-video",
+                        iter_n=iter_n,
+                        ctx={"issue_id": issue_id},
+                        verdict_keywords=("recorded", "skipped", "failed"),
+                        dry_run=dry_run,
+                    )
+                    _record_proof_result(
+                        run_dir, step="demo-video", iter_n=iter_n, result=demo
+                    )
+                except Exception as exc:  # noqa: BLE001 - proof failure retries actor
+                    demo_error = exc
+                demo_failure = _demo_evidence_failure(
+                    run_dir,
+                    verdict="" if demo_error is not None else demo.verdict,
+                    error=demo_error,
                 )
-                _record_proof_result(
-                    run_dir, step="demo-video", iter_n=iter_n, result=demo
-                )
+                if demo_failure:
+                    fix_list = demo_failure
+                    logger.info(
+                        "agentic: iter %s required demo failed: %s",
+                        iter_n,
+                        demo_failure,
+                    )
+                    continue
             if delivery_plan.review_artifacts:
                 artifacts = agent_step(
                     agent_dir=_AGENTS_DIR / "review-artifacts",

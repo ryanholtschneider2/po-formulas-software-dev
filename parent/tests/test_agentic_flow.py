@@ -458,7 +458,18 @@ def test_ui_delivery_runs_complete_live_proof_chain(
     def fake(**kwargs: object) -> AgentStepResult:
         calls.append(dict(kwargs))
         step = kwargs["step"]
-        verdicts = {"review": "pass", "verify": "approved"}
+        if step == "demo-video":
+            demo_path = (
+                tmp_path
+                / "rig/.planning/software-dev-agentic/seed-ui/review-artifacts/demo.mp4"
+            )
+            demo_path.parent.mkdir(parents=True, exist_ok=True)
+            demo_path.write_bytes(b"current demo")
+        verdicts = {
+            "review": "pass",
+            "verify": "approved",
+            "demo-video": "recorded",
+        }
         return AgentStepResult(
             bead_id=f"seed-{step}",
             verdict=verdicts.get(str(step), "complete"),
@@ -499,6 +510,88 @@ def test_ui_delivery_runs_complete_live_proof_chain(
         "demo": True,
     }
     assert closed == ["seed-ui"]
+
+
+def test_required_demo_skipped_or_missing_retries_and_never_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+    closed: list[str] = []
+    rig = tmp_path / "rig"
+    run_dir = rig / ".planning/software-dev-agentic/seed-ui-missing"
+    stale_demo = run_dir / "review-artifacts/demo.mp4"
+    stale_demo.parent.mkdir(parents=True)
+    stale_demo.write_bytes(b"stale demo")
+
+    def fake(**kwargs: object) -> AgentStepResult:
+        calls.append(dict(kwargs))
+        step = str(kwargs["step"])
+        verdict = {"review": "pass", "demo-video": "skipped"}.get(step, "complete")
+        return AgentStepResult(
+            bead_id=f"seed-{step}", verdict=verdict, closed_by="agent"
+        )
+
+    monkeypatch.setenv("PO_DEMO_VIDEO", "1")
+    monkeypatch.setattr(ag, "agent_step", fake)
+    _patch_common(monkeypatch, closed)
+    monkeypatch.setattr(
+        ag.agentic_sizing,
+        "read_sizing",
+        lambda run_dir: ag.agentic_sizing.SizingDecision(
+            "proceed", "medium", "medium", ("web UI",), 2, "Scoped.", "", ("ui",)
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="did not converge"):
+        ag.software_dev_agentic.fn(
+            issue_id="seed-ui-missing", rig="rig", rig_path=str(rig), iter_cap=2
+        )
+
+    assert [call["step"] for call in calls].count("demo-video") == 2
+    assert not stale_demo.exists()
+    assert not any(call["step"] == "verify" for call in calls)
+    worker_calls = [call for call in calls if call["step"] == "agentic"]
+    assert "instead of recorded" in worker_calls[1]["ctx"]["revision_note"]
+    assert closed == []
+
+
+def test_required_demo_role_error_retries_actor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+    closed: list[str] = []
+
+    def fake(**kwargs: object) -> AgentStepResult:
+        calls.append(dict(kwargs))
+        step = str(kwargs["step"])
+        if step == "demo-video":
+            raise RuntimeError("recorder unavailable")
+        verdict = "pass" if step == "review" else "complete"
+        return AgentStepResult(
+            bead_id=f"seed-{step}", verdict=verdict, closed_by="agent"
+        )
+
+    monkeypatch.setenv("PO_DEMO_VIDEO", "1")
+    monkeypatch.setattr(ag, "agent_step", fake)
+    _patch_common(monkeypatch, closed)
+    monkeypatch.setattr(
+        ag.agentic_sizing,
+        "read_sizing",
+        lambda run_dir: ag.agentic_sizing.SizingDecision(
+            "proceed", "medium", "medium", ("web UI",), 2, "Scoped.", "", ("ui",)
+        ),
+    )
+    rig = tmp_path / "rig"
+    rig.mkdir()
+
+    with pytest.raises(RuntimeError, match="did not converge"):
+        ag.software_dev_agentic.fn(
+            issue_id="seed-ui-error", rig="rig", rig_path=str(rig), iter_cap=2
+        )
+
+    worker_calls = [call for call in calls if call["step"] == "agentic"]
+    assert "recorder unavailable" in worker_calls[1]["ctx"]["revision_note"]
+    assert closed == []
 
 
 def test_verifier_rejection_returns_report_to_actor_and_reverifies(

@@ -108,6 +108,17 @@ UI therefore cannot pass from a diff alone. Proof-role results, discovered
 screenshots, and the demo path are appended to `verified-delivery.json`. A
 verifier rejection is fed to the next actor iteration and all required proof
 phases run again, preventing stale evidence from substituting for a retest.
+When demo capture is enabled for UI, the flow clears any prior demo before the
+role runs and requires a new, non-empty `review-artifacts/demo.mp4`; a skip,
+missing file, or role error returns to the actor and cannot reach approval.
+
+Exercise the decorated Prefect topology with a controlled live rejection and
+retry (without touching the shared PO installation):
+
+```bash
+cd parent
+uv run python evals/run_agentic_proof_smoke.py /tmp/agentic-proof-smoke
+```
 
 ### Verified-delivery artifact
 
