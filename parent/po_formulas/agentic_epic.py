@@ -76,6 +76,7 @@ from prefect_orchestration.beads_meta import (
 )
 
 from po_formulas import shared_branch as sb
+from po_formulas import delivery_truth, verified_delivery
 from po_formulas.agentic import _bd_set_metadata, _read_text
 from po_formulas.graph import graph_run
 from po_formulas.software_dev import (
@@ -87,6 +88,7 @@ from po_formulas.software_dev import (
 _AGENTS_DIR = Path(__file__).parent / "agents"
 _PLAN_FILE = "plan.json"
 _PRD_FILE = "prd.md"
+_ACCEPTANCE_MANIFEST_FILE = "acceptance-manifest.json"
 _CHILD_FORMULA = "software-dev-agentic"
 
 
@@ -400,6 +402,124 @@ def _integration_summary(dispatch: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _build_acceptance_manifest(
+    *,
+    child_ids: list[str],
+    dispatch: dict[str, Any],
+    rig_path: Path,
+    pack_path: Path,
+    run_dir: Path,
+    base_branch: str,
+    epic_branch: str,
+) -> dict[str, Any]:
+    """Persist mechanical delivery facts for assembled-epic judgment.
+
+    This deliberately does not decide whether evidence is sufficient for a PRD
+    criterion. It proves identities, ancestry, artifact presence, and terminal
+    state; the acceptance model judges product coverage and broken seams.
+    """
+    assembled_sha = delivery_truth.revision(pack_path, epic_branch)
+    base_sha = delivery_truth.revision(pack_path, base_branch)
+    delivery_truth.require_ancestor(
+        pack_path,
+        base_sha,
+        assembled_sha,
+        label="assembled epic base mismatch",
+    )
+    results = (dispatch or {}).get("results") or {}
+    blocking_facts: list[str] = []
+    children: list[dict[str, Any]] = []
+    for child_id in child_ids:
+        result = results.get(child_id)
+        integration = result.get("integration") if isinstance(result, dict) else {}
+        merged = bool(isinstance(integration, dict) and integration.get("merged"))
+        artifact_path = (
+            rig_path
+            / ".planning"
+            / "software-dev-agentic"
+            / child_id
+            / verified_delivery.ARTIFACT_NAME
+        )
+        artifact_error = ""
+        artifact: dict[str, Any] | None = None
+        raw_artifact = (
+            result.get("verified_delivery") if isinstance(result, dict) else None
+        )
+        try:
+            if isinstance(raw_artifact, dict):
+                artifact = verified_delivery.normalize(raw_artifact)
+            elif artifact_path.is_file():
+                artifact = verified_delivery.read(artifact_path.parent)
+            else:
+                artifact_error = "verified-delivery artifact missing"
+        except ValueError as exc:
+            artifact_error = str(exc)
+
+        ancestry_proven = False
+        head_sha = (
+            str((artifact or {}).get("revisions", {}).get("head") or "")
+            if artifact
+            else ""
+        )
+        if merged and head_sha:
+            try:
+                delivery_truth.require_ancestor(
+                    pack_path,
+                    head_sha,
+                    assembled_sha,
+                    label=f"child {child_id} is not integrated",
+                )
+                ancestry_proven = True
+            except delivery_truth.DeliveryTruthError as exc:
+                artifact_error = str(exc)
+
+        terminal_state = (
+            str((artifact or {}).get("terminal", {}).get("state") or "")
+            if artifact
+            else ""
+        )
+        facts: list[str] = []
+        if result is None:
+            facts.append("dispatch result missing")
+        if not merged:
+            facts.append("child not integrated")
+        if artifact_error:
+            facts.append(artifact_error)
+        if artifact and terminal_state != "completed":
+            facts.append(f"delivery terminal state is {terminal_state or 'missing'}")
+        if artifact and not head_sha:
+            facts.append("delivery head revision missing")
+        if merged and head_sha and not ancestry_proven and not artifact_error:
+            facts.append("child ancestry not proven")
+        blocking_facts.extend(f"{child_id}: {fact}" for fact in facts)
+        children.append(
+            {
+                "id": child_id,
+                "dispatch_present": result is not None,
+                "integrated": merged,
+                "ancestry_proven": ancestry_proven,
+                "artifact_path": str(artifact_path),
+                "artifact": artifact,
+                "blocking_facts": facts,
+            }
+        )
+
+    manifest = {
+        "schema": "po.epic-acceptance-manifest",
+        "version": 1,
+        "base_branch": base_branch,
+        "base_sha": base_sha,
+        "epic_branch": epic_branch,
+        "assembled_sha": assembled_sha,
+        "children": children,
+        "blocking_facts": blocking_facts,
+    }
+    (run_dir / _ACCEPTANCE_MANIFEST_FILE).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
+    return manifest
+
+
 def _acceptance_critique(run_dir: Path) -> str:
     """Read the latest epic acceptance critique for a fixer bead body."""
     critique = _read_text(run_dir / "critique-epic-acceptance.md").strip()
@@ -414,10 +534,11 @@ def _create_acceptance_fix_bead(
     epic_branch: str,
     base_branch: str,
     dispatch: dict[str, Any],
+    fix_n: int,
     logger: Any,
 ) -> str:
     """Create the follow-up child that repairs a failed epic acceptance gate."""
-    requested_id = f"{epic_id}.acceptance-fix"
+    requested_id = f"{epic_id}.acceptance-fix-{fix_n}"
     description = (
         f"Fix the remaining acceptance gaps for epic `{epic_id}`.\n\n"
         "The shared-branch epic acceptance critic failed after the planned "
@@ -427,6 +548,7 @@ def _create_acceptance_fix_bead(
         "## Inputs\n\n"
         f"- PRD: `{run_dir / _PRD_FILE}`\n"
         f"- Acceptance critique: `{run_dir / 'critique-epic-acceptance.md'}`\n"
+        f"- Pinned acceptance manifest: `{run_dir / _ACCEPTANCE_MANIFEST_FILE}`\n"
         f"- Base branch: `{base_branch}`\n"
         f"- Integration branch: `{epic_branch}`\n\n"
         "## Current child integration state\n\n"
@@ -469,6 +591,7 @@ def _run_epic_acceptance_critic(
     pack_path: Path,
     epic_branch: str,
     base_branch: str,
+    child_ids: list[str],
     dispatch: dict[str, Any],
     iter_n: int,
     dry_run: bool,
@@ -476,6 +599,19 @@ def _run_epic_acceptance_critic(
     """Return pass/fail for the assembled epic branch."""
     if dry_run:
         return "pass"
+    manifest = _build_acceptance_manifest(
+        child_ids=child_ids,
+        dispatch=dispatch,
+        rig_path=rig_path,
+        pack_path=pack_path,
+        run_dir=run_dir,
+        base_branch=base_branch,
+        epic_branch=epic_branch,
+    )
+    try:
+        integration_path = delivery_truth.worktree_for_branch(pack_path, epic_branch)
+    except delivery_truth.DeliveryTruthError:
+        integration_path = pack_path
     accept = agent_step(
         agent_dir=_AGENTS_DIR / "agentic-epic-acceptance-critic",
         task=_AGENTS_DIR / "agentic-epic-acceptance-critic" / "task.md",
@@ -490,9 +626,14 @@ def _run_epic_acceptance_critic(
             "epic_branch": epic_branch,
             "base_branch": base_branch,
             "integration_summary": _integration_summary(dispatch),
+            "acceptance_manifest": str(run_dir / _ACCEPTANCE_MANIFEST_FILE),
+            "assembled_sha": manifest["assembled_sha"],
+            "integration_path": str(integration_path),
         },
         verdict_keywords=("pass", "fail"),
     )
+    if manifest["blocking_facts"]:
+        return "fail"
     return accept.verdict
 
 
@@ -630,6 +771,7 @@ def agentic_epic(
     shared_branch: bool = True,
     base_branch: str = "main",
     force_replan: bool = False,
+    acceptance_fix_cap: int = 2,
 ) -> dict[str, Any]:
     """Scope, plan, and dispatch an epic from its goal as one shared-branch PR.
 
@@ -751,6 +893,7 @@ def agentic_epic(
         # a complete epic.
         acceptance_fix_id: str | None = None
         acceptance_fix_dispatch: dict[str, Any] | None = None
+        acceptance_fix_ids: list[str] = []
         if shared_branch:
             ahead = sb.commits_ahead(pack_path_p, base_branch, epic_branch)
             accept_verdict = "n/a"
@@ -769,11 +912,18 @@ def agentic_epic(
                     pack_path=pack_path_p,
                     epic_branch=epic_branch,
                     base_branch=base_branch,
+                    child_ids=child_ids,
                     dispatch=dispatch,
                     iter_n=1,
                     dry_run=dry_run,
                 )
-                if accept_verdict != "pass" and not dry_run:
+                fix_n = 0
+                while (
+                    accept_verdict != "pass"
+                    and not dry_run
+                    and fix_n < acceptance_fix_cap
+                ):
+                    fix_n += 1
                     acceptance_fix_id = _create_acceptance_fix_bead(
                         epic_id=epic_id,
                         rig_path=rig_path_p,
@@ -781,8 +931,10 @@ def agentic_epic(
                         epic_branch=epic_branch,
                         base_branch=base_branch,
                         dispatch=dispatch,
+                        fix_n=fix_n,
                         logger=logger,
                     )
+                    acceptance_fix_ids.append(acceptance_fix_id)
                     acceptance_fix_dispatch = graph_run(
                         root_id=acceptance_fix_id,
                         rig=rig,
@@ -796,6 +948,10 @@ def agentic_epic(
                     )
                     dispatch = {
                         **dispatch,
+                        "results": {
+                            **(dispatch.get("results") or {}),
+                            **(acceptance_fix_dispatch.get("results") or {}),
+                        },
                         "acceptance_fix": {
                             "id": acceptance_fix_id,
                             "dispatch": acceptance_fix_dispatch,
@@ -810,8 +966,9 @@ def agentic_epic(
                             pack_path=pack_path_p,
                             epic_branch=epic_branch,
                             base_branch=base_branch,
+                            child_ids=[*child_ids, *acceptance_fix_ids],
                             dispatch=dispatch,
-                            iter_n=2,
+                            iter_n=fix_n + 1,
                             dry_run=False,
                         )
                 draft = accept_verdict != "pass"
@@ -884,6 +1041,7 @@ def agentic_epic(
             "epic_branch": epic_branch or None,
             "pr": pr_info,
             "acceptance_fix_id": acceptance_fix_id,
+            "acceptance_fix_ids": acceptance_fix_ids,
             "acceptance_fix_dispatch": acceptance_fix_dispatch,
         }
     except Exception as exc:

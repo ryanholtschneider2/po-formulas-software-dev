@@ -421,6 +421,14 @@ def _patch_common(monkeypatch, run_dir, plan):
     monkeypatch.setattr(ae, "_bd_set_metadata", lambda *a, **k: None)
     monkeypatch.setattr(ae, "_bd_dep_add", lambda *a, **k: None)
     monkeypatch.setattr(ae, "close_issue", lambda *a, **k: None)
+    monkeypatch.setattr(
+        ae,
+        "_build_acceptance_manifest",
+        lambda **kwargs: {
+            "assembled_sha": "assembled-sha",
+            "blocking_facts": [],
+        },
+    )
 
 
 def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypatch):
@@ -628,23 +636,23 @@ def test_agentic_epic_acceptance_fail_runs_fixer_then_opens_ready_pr(
         epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True
     )
     assert len(graph_calls) == 2
-    assert graph_calls[1]["root_id"] == f"{epic_id}.acceptance-fix"
+    assert graph_calls[1]["root_id"] == f"{epic_id}.acceptance-fix-1"
     assert graph_calls[1]["root_as_node"] is True
     assert graph_calls[1]["extra_formula_kwargs"] == {
         "base_branch": "main",
         "epic_branch": f"epic/{epic_id}",
         "parent_epic_id": epic_id,
     }
-    assert created[-1] == (epic_id, f"{epic_id}.acceptance-fix")
+    assert created[-1] == (epic_id, f"{epic_id}.acceptance-fix-1")
     assert (
-        f"{epic_id}.acceptance-fix",
+        f"{epic_id}.acceptance-fix-1",
         "po.formula",
         "software-dev-agentic",
     ) in stamped
     assert pr_calls["draft"] is False
     assert "PASS" in pr_calls["body"]
     assert result["pr"]["acceptance_verdict"] == "pass"
-    assert result["acceptance_fix_id"] == f"{epic_id}.acceptance-fix"
+    assert result["acceptance_fix_id"] == f"{epic_id}.acceptance-fix-1"
     assert closed == [epic_id]
 
 
@@ -707,13 +715,21 @@ def test_agentic_epic_second_acceptance_fail_opens_draft_and_leaves_epic_open(
     monkeypatch.setattr(ae, "close_issue", lambda i, **k: closed.append(i))
 
     result = ae.agentic_epic.fn(
-        epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True
+        epic_id=epic_id,
+        rig="rig",
+        rig_path=str(tmp_path),
+        shared_branch=True,
+        acceptance_fix_cap=2,
     )
 
     assert pr_calls["draft"] is True
     assert "FAIL" in pr_calls["body"]
     assert result["status"] == "incomplete"
     assert result["pr"]["acceptance_verdict"] == "fail"
+    assert result["acceptance_fix_ids"] == [
+        f"{epic_id}.acceptance-fix-1",
+        f"{epic_id}.acceptance-fix-2",
+    ]
     assert closed == []
 
 
@@ -740,6 +756,108 @@ def test_integration_summary_marks_landed_and_dropped():
     assert "`c3`: FAILED" in s and "critic=fail" in s
     assert "`c4`: DROPPED — not integrated" in s
     assert "no per-child results" in ae._integration_summary({})
+
+
+def _delivery(head: str = "child-sha") -> dict:
+    return {
+        "revisions": {"head": head},
+        "terminal": {"state": "completed"},
+        "changed_surfaces": ["api"],
+        "live_verification": {"plan": ["smoke"], "results": []},
+    }
+
+
+def test_acceptance_manifest_pins_complete_child_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        ae.delivery_truth,
+        "revision",
+        lambda repo, ref: "assembled-sha" if ref == "epic/e1" else "base-sha",
+    )
+    monkeypatch.setattr(ae.delivery_truth, "require_ancestor", lambda *a, **k: None)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    manifest = ae._build_acceptance_manifest(
+        child_ids=["child-1"],
+        dispatch={
+            "results": {
+                "child-1": {
+                    "integration": {"merged": True},
+                    "verified_delivery": _delivery(),
+                }
+            }
+        },
+        rig_path=tmp_path,
+        pack_path=tmp_path,
+        run_dir=run_dir,
+        base_branch="main",
+        epic_branch="epic/e1",
+    )
+
+    assert manifest["assembled_sha"] == "assembled-sha"
+    assert manifest["blocking_facts"] == []
+    assert manifest["children"][0]["ancestry_proven"] is True
+    assert json.loads((run_dir / ae._ACCEPTANCE_MANIFEST_FILE).read_text()) == manifest
+
+
+def test_acceptance_manifest_blocks_missing_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(ae.delivery_truth, "revision", lambda repo, ref: f"{ref}-sha")
+    monkeypatch.setattr(ae.delivery_truth, "require_ancestor", lambda *a, **k: None)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    manifest = ae._build_acceptance_manifest(
+        child_ids=["missing-ui"],
+        dispatch={"results": {"missing-ui": {"integration": {"merged": True}}}},
+        rig_path=tmp_path,
+        pack_path=tmp_path,
+        run_dir=run_dir,
+        base_branch="main",
+        epic_branch="epic/e1",
+    )
+
+    assert (
+        "missing-ui: verified-delivery artifact missing" in manifest["blocking_facts"]
+    )
+
+
+def test_acceptance_manifest_blocks_unintegrated_child(tmp_path, monkeypatch):
+    monkeypatch.setattr(ae.delivery_truth, "revision", lambda repo, ref: f"{ref}-sha")
+    monkeypatch.setattr(ae.delivery_truth, "require_ancestor", lambda *a, **k: None)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    manifest = ae._build_acceptance_manifest(
+        child_ids=["foundation"],
+        dispatch={
+            "results": {
+                "foundation": {
+                    "integration": {"merged": False},
+                    "verified_delivery": _delivery(),
+                }
+            }
+        },
+        rig_path=tmp_path,
+        pack_path=tmp_path,
+        run_dir=run_dir,
+        base_branch="main",
+        epic_branch="epic/e1",
+    )
+
+    assert "foundation: child not integrated" in manifest["blocking_facts"]
+
+
+def test_acceptance_fixtures_cover_required_failure_shapes():
+    fixture_path = (
+        Path(__file__).parents[1] / "evals" / "agentic-epic-acceptance-cases.json"
+    )
+    cases = json.loads(fixture_path.read_text())
+    assert {case["id"] for case in cases} == {
+        "foundation-only",
+        "missing-ui",
+        "unintegrated-child",
+    }
+    assert all(case["expected"] == "fail" for case in cases)
 
 
 def test_agentic_epic_default_is_shared_branch(tmp_path, monkeypatch):

@@ -1,0 +1,33 @@
+[
+  {
+    "id": "foundation-only",
+    "prd": ["A customer can complete the onboarding flow in the live product"],
+    "child_evidence": {
+      "changed_surfaces": ["database", "API schema"],
+      "live_verification": ["unit tests passed"]
+    },
+    "assembled_observation": "No route or user-facing flow exists.",
+    "expected": "fail"
+  },
+  {
+    "id": "missing-ui",
+    "prd": ["The new records are visible and editable in the web UI"],
+    "child_evidence": {
+      "changed_surfaces": ["API"],
+      "live_verification": ["POST and GET API smoke passed"]
+    },
+    "assembled_observation": "The API works, but the assembled app has no UI for the records.",
+    "expected": "fail"
+  },
+  {
+    "id": "unintegrated-child",
+    "prd": ["The API and UI work together end to end"],
+    "child_evidence": {
+      "terminal": "completed",
+      "head": "child-sha"
+    },
+    "dispatch": {"integrated": false},
+    "assembled_observation": "The completed child SHA is not an ancestor of the assembled SHA.",
+    "expected": "fail"
+  }
+]
