@@ -197,6 +197,33 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, closed: list[str]) -> None:
     monkeypatch.setattr(ag, "get_run_logger", lambda: _NULL_LOGGER)
     monkeypatch.setattr(ag, "claim_issue", lambda *a, **kw: None)
     monkeypatch.setattr(ag, "close_issue", lambda iid, *a, **kw: closed.append(iid))
+    monkeypatch.setattr(
+        ag.delivery_truth,
+        "branch_truth",
+        lambda repo, *, branch, base_branch: {
+            "base_branch": base_branch,
+            "base_sha": "base-sha",
+            "head_branch": branch,
+            "head_sha": "head-sha",
+        },
+    )
+    monkeypatch.setattr(
+        ag.delivery_truth, "pull_request_truth", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        ag.delivery_truth, "worktree_for_branch", lambda *args: Path("/worker")
+    )
+    monkeypatch.setattr(
+        ag.delivery_truth,
+        "localhost_preview_truth",
+        lambda url, **kwargs: {
+            "url": url,
+            "revision": "head-sha",
+            "process_id": 123,
+            "app_root": "/worker",
+            "process_cwd": "/worker",
+        },
+    )
 
 
 def test_flow_stamps_preview_url_on_pass(

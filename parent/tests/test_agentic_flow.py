@@ -68,6 +68,27 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, closed: list[str]) -> None:
     monkeypatch.setattr(ag, "get_run_logger", lambda: _NULL_LOGGER)
     monkeypatch.setattr(ag, "claim_issue", lambda *a, **kw: None)
     monkeypatch.setattr(ag, "close_issue", lambda iid, *a, **kw: closed.append(iid))
+    monkeypatch.setattr(
+        ag.delivery_truth,
+        "branch_truth",
+        lambda *a, **kw: {
+            "base_branch": kw["base_branch"],
+            "base_sha": "base-sha",
+            "head_branch": kw["branch"],
+            "head_sha": "head-sha",
+        },
+    )
+    monkeypatch.setattr(ag.delivery_truth, "require_ancestor", lambda *a, **kw: None)
+    monkeypatch.setattr(ag.delivery_truth, "pull_request_truth", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        ag.delivery_truth,
+        "integration_truth",
+        lambda *a, **kw: {
+            "base_sha": "base-sha",
+            "child_sha": "head-sha",
+            "integration_sha": "integration-sha",
+        },
+    )
 
 
 def _run_dir_for(rig: Path, issue_id: str = "seed-1") -> Path:

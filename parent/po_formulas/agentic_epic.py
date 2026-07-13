@@ -724,7 +724,7 @@ def agentic_epic(
         if shared_branch:
             epic_branch = sb.epic_branch_name(epic_id)
             branch_info = sb.create_integration_branch(
-                rig_path_p, epic_id, base_branch=base_branch
+                pack_path_p, epic_id, base_branch=base_branch
             )
             extra_kwargs |= {"epic_branch": epic_branch, "parent_epic_id": epic_id}
             logger.info(
@@ -752,7 +752,7 @@ def agentic_epic(
         acceptance_fix_id: str | None = None
         acceptance_fix_dispatch: dict[str, Any] | None = None
         if shared_branch:
-            ahead = sb.commits_ahead(rig_path_p, base_branch, epic_branch)
+            ahead = sb.commits_ahead(pack_path_p, base_branch, epic_branch)
             accept_verdict = "n/a"
             if ahead > 0:
                 # Epic acceptance-critic: the ONLY check that reads the PRD against
@@ -801,7 +801,7 @@ def agentic_epic(
                             "dispatch": acceptance_fix_dispatch,
                         },
                     }
-                    ahead = sb.commits_ahead(rig_path_p, base_branch, epic_branch)
+                    ahead = sb.commits_ahead(pack_path_p, base_branch, epic_branch)
                     if ahead > 0:
                         accept_verdict = _run_epic_acceptance_critic(
                             epic_id=epic_id,
@@ -826,7 +826,7 @@ def agentic_epic(
                 )
                 pr_info = dict(
                     sb.open_draft_pr(
-                        rig_path_p,
+                        pack_path_p,
                         branch=epic_branch,
                         base_branch=base_branch,
                         title=f"[epic] {epic_id}",
@@ -847,7 +847,7 @@ def agentic_epic(
                     "reason": "no children integrated commits — no PR",
                     "acceptance_verdict": "n/a",
                 }
-            sb.cleanup_integration_worktree(rig_path_p, epic_id)
+            sb.cleanup_integration_worktree(pack_path_p, epic_id)
             logger.info(
                 "agentic-epic: shared-branch finalize — PR=%s (acceptance=%s, %d commit(s) ahead)",
                 pr_info.get("url") or f"(none: {pr_info.get('reason')})",
