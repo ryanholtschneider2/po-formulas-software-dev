@@ -458,6 +458,9 @@ def test_ui_delivery_runs_complete_live_proof_chain(
     def fake(**kwargs: object) -> AgentStepResult:
         calls.append(dict(kwargs))
         step = kwargs["step"]
+        run_dir = Path(str(kwargs["run_dir"]))
+        if step == "deploy-smoke":
+            (run_dir / "smoke-test-output.txt").write_text("SMOKE PASSED\n")
         if step == "demo-video":
             demo_path = (
                 tmp_path
@@ -465,6 +468,14 @@ def test_ui_delivery_runs_complete_live_proof_chain(
             )
             demo_path.parent.mkdir(parents=True, exist_ok=True)
             demo_path.write_bytes(b"current demo")
+        if step == "review-artifacts":
+            review_dir = run_dir / "review-artifacts"
+            review_dir.mkdir(parents=True, exist_ok=True)
+            (review_dir / "summary.md").write_text("# Review\n")
+        if step == "verify":
+            (run_dir / f"verification-report-iter-{kwargs['iter_n']}.md").write_text(
+                "# Verification\n\nPASS\n"
+            )
         verdicts = {
             "review": "pass",
             "verify": "approved",
@@ -526,6 +537,10 @@ def test_required_demo_skipped_or_missing_retries_and_never_closes(
     def fake(**kwargs: object) -> AgentStepResult:
         calls.append(dict(kwargs))
         step = str(kwargs["step"])
+        if step == "deploy-smoke":
+            (Path(str(kwargs["run_dir"])) / "smoke-test-output.txt").write_text(
+                "SMOKE PASSED\n"
+            )
         verdict = {"review": "pass", "demo-video": "skipped"}.get(step, "complete")
         return AgentStepResult(
             bead_id=f"seed-{step}", verdict=verdict, closed_by="agent"
@@ -564,6 +579,10 @@ def test_required_demo_role_error_retries_actor(
     def fake(**kwargs: object) -> AgentStepResult:
         calls.append(dict(kwargs))
         step = str(kwargs["step"])
+        if step == "deploy-smoke":
+            (Path(str(kwargs["run_dir"])) / "smoke-test-output.txt").write_text(
+                "SMOKE PASSED\n"
+            )
         if step == "demo-video":
             raise RuntimeError("recorder unavailable")
         verdict = "pass" if step == "review" else "complete"
@@ -607,6 +626,12 @@ def test_verifier_rejection_returns_report_to_actor_and_reverifies(
     def fake(**kwargs: object) -> AgentStepResult:
         calls.append(dict(kwargs))
         step = kwargs["step"]
+        current_run_dir = Path(str(kwargs["run_dir"]))
+        if step == "review-artifacts":
+            review_dir = current_run_dir / "review-artifacts"
+            review_dir.mkdir(parents=True, exist_ok=True)
+            (review_dir / "summary.md").write_text("# Review\n")
+            (review_dir / "overview.md").write_text("# Overview\n")
         if step == "review":
             verdict = "pass"
         elif step == "verify":
@@ -615,6 +640,10 @@ def test_verifier_rejection_returns_report_to_actor_and_reverifies(
                 (run_dir / "verification-report-iter-1.md").write_text(
                     "Live API returned the old response shape."
                 )
+            else:
+                (
+                    run_dir / f"verification-report-iter-{kwargs['iter_n']}.md"
+                ).write_text("# Verification\n\nPASS\n")
         else:
             verdict = "complete"
         return AgentStepResult(
@@ -648,6 +677,35 @@ def test_verifier_rejection_returns_report_to_actor_and_reverifies(
     assert [call["step"] for call in calls].count("verify") == 2
     assert [call["step"] for call in calls].count("review-artifacts") == 2
     assert closed == ["seed-live"]
+
+
+@pytest.mark.parametrize(
+    ("step", "filename", "body", "message"),
+    [
+        ("deploy-smoke", "smoke-test-output.txt", "", "no fresh"),
+        ("deploy-smoke", "smoke-test-output.txt", "SMOKE FAILED", "records failure"),
+        ("review-artifacts", "review-artifacts/summary.md", "", "no fresh"),
+        ("verify", "verification-report-iter-1.md", "", "no fresh"),
+    ],
+)
+def test_structural_proof_evidence_fails_closed(
+    tmp_path: Path, step: str, filename: str, body: str, message: str
+) -> None:
+    path = tmp_path / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    assert message in ag._proof_evidence_failure(tmp_path, step=step, iter_n=1)
+
+
+def test_proof_mode_defaults_adaptive_and_strict_is_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PO_AGENTIC_PROOF_MODE", raising=False)
+    assert ag._resolve_proof_mode() == "adaptive"
+    monkeypatch.setenv("PO_AGENTIC_PROOF_MODE", " STRICT ")
+    assert ag._resolve_proof_mode() == "strict"
+    monkeypatch.setenv("PO_AGENTIC_PROOF_MODE", "legacy-value")
+    assert ag._resolve_proof_mode() == "adaptive"
 
 
 # ─────────────────────── _dispatch_pr_sheriff (diagnosability) ───────

@@ -30,6 +30,8 @@ uv pip install -e wts
 `wts` was forked from `parent` to add git-worktree isolation. Standalone issue flows get their own working tree, and `epic-wts` creates one working tree for the whole epic so serialized children build on the same branch without per-child merge churn. In both cases `.beads/` and `.planning/` are symlinked back to the main rig so bd ops and run-dir artifacts stay authoritative in one place. The fork keeps the EP namespace clean — operators opt in by running `po run software-dev-full-wts` instead of `po run software-dev-full`. Once the worktree pattern soaks in across formulas the two will likely converge again, but for now keeping them as two distributions lets us iterate on `wts` without disturbing the canonical pack.
 
 See [`parent/README.md`](./parent/README.md) and [`wts/README.md`](./wts/README.md) for per-package detail.
+SoloCo operators enabling strict product proof should also read
+[`parent/docs/soloco-strict-product-mode.md`](./parent/docs/soloco-strict-product-mode.md).
 
 ## Layout
 
@@ -50,7 +52,7 @@ po-formulas-software-dev/
 
 Both subdirs ship their own `pyproject.toml`, `tests/`, and overlay. Cross-subdir imports are forbidden — each package stands on its own. Shared deps (`prefect-orchestration`) are sourced via each `pyproject.toml`'s `[tool.uv.sources]` block, with paths relative to that file.
 
-## `software-dev-agentic` preview/demo knobs (per-rig)
+## `software-dev-agentic` proof/preview/demo knobs (per-rig)
 
 The agentic flow can end a run with a **reachable preview** of the change,
 surfaced as `po.preview_url` bead metadata so dashboard cards (orchestra) can
@@ -59,6 +61,7 @@ gates test layers):
 
 | Var | Values | Effect |
 |---|---|---|
+| `PO_AGENTIC_PROOF_MODE` | `adaptive` \| `strict` | `adaptive` (default) follows the sizing-selected proof plan. `strict` requires fresh review artifacts and live verification for every task without reclassifying its surface or inventing deployability. |
 | `PO_PREVIEW` | `local` \| `cloud` \| `off` | `off` (default): no preview work. `local`: the worker leaves its dev server running after the PR and reports `http://localhost:<port>`. `cloud`: the worker resolves a public URL via the rclaude shim (`rpreview <port>`). |
 | `PO_DEMO_VIDEO` | `0` \| `1` | `1` asks the worker to record a short demo video for visual changes. Default `0`. |
 
@@ -74,6 +77,7 @@ process proof and therefore must not claim a preview URL; use local strict proof
 until a remote revision-attestation protocol is configured. Example `.po-env`:
 
 ```
+PO_AGENTIC_PROOF_MODE=strict
 PO_PREVIEW=local
 PO_DEMO_VIDEO=1
 ```

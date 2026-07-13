@@ -30,9 +30,10 @@ All the convergence machinery (bead-stamping, session affinity, nudge
 ladder, verdict parsing, cache fast-path, run_dir, ``_record_flow_outcome``)
 is reused wholesale from ``agent_step`` and ``software_dev``.
 
-Per-rig preview/demo knobs (read from ``<rig>/.po-env`` via
+Per-rig proof/preview/demo knobs (read from ``<rig>/.po-env`` via
 ``_load_rig_env``)::
 
+    PO_AGENTIC_PROOF_MODE=adaptive|strict  # default adaptive
     PO_PREVIEW=local|cloud|off   # default off
     PO_DEMO_VIDEO=0|1            # default 0
 
@@ -191,6 +192,7 @@ def _dispatch_provenance(
 # parse the agent's reply text.
 _PREVIEW_URL_FILE = "preview_url.txt"
 _VALID_PREVIEW_MODES = ("local", "cloud", "off")
+_VALID_PROOF_MODES = ("adaptive", "strict")
 _TRUTHY = ("1", "true", "yes", "on")
 
 
@@ -207,6 +209,12 @@ def _resolve_preview_mode() -> str:
 def _demo_video_requested() -> bool:
     """Whether this rig requests a demo video (``PO_DEMO_VIDEO`` truthy)."""
     return os.environ.get("PO_DEMO_VIDEO", "0").strip().lower() in _TRUTHY
+
+
+def _resolve_proof_mode() -> str:
+    """Return the opt-in delivery proof policy, preserving adaptive defaults."""
+    mode = os.environ.get("PO_AGENTIC_PROOF_MODE", "adaptive").strip().lower()
+    return mode if mode in _VALID_PROOF_MODES else "adaptive"
 
 
 def _preview_note(mode: str, run_dir: Path, demo: bool) -> str:
@@ -439,6 +447,58 @@ def _demo_evidence_failure(
     )
 
 
+def _clear_phase_evidence(run_dir: Path, plan: agentic_sizing.DeliveryPlan) -> None:
+    """Remove phase-owned outputs so retries cannot reuse stale proof bytes."""
+    if plan.deploy_smoke:
+        (run_dir / "smoke-test-output.txt").unlink(missing_ok=True)
+    if plan.review_artifacts:
+        review_dir = run_dir / "review-artifacts"
+        (review_dir / "summary.md").unlink(missing_ok=True)
+        (review_dir / "overview.md").unlink(missing_ok=True)
+
+
+def _nonempty_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _proof_evidence_failure(
+    run_dir: Path,
+    *,
+    step: str,
+    iter_n: int,
+    require_overview: bool = False,
+) -> str:
+    """Validate only the structural evidence contract for a proof phase."""
+    if step == "deploy-smoke":
+        path = run_dir / "smoke-test-output.txt"
+        if not _nonempty_file(path):
+            return f"Deploy smoke produced no fresh non-empty evidence at {path}."
+        body = _read_text(path).lower()
+        if "smoke failed" in body or "status: fail" in body or "result: fail" in body:
+            return f"Deploy smoke evidence records failure at {path}."
+        return ""
+    if step == "review-artifacts":
+        summary = run_dir / "review-artifacts" / "summary.md"
+        if not _nonempty_file(summary):
+            return f"Review packaging produced no fresh non-empty summary at {summary}."
+        overview = run_dir / "review-artifacts" / "overview.md"
+        if require_overview and not _nonempty_file(overview):
+            return (
+                "Workflow/infrastructure review packaging produced no fresh "
+                f"non-empty overview at {overview}."
+            )
+        return ""
+    if step == "verify":
+        report = run_dir / f"verification-report-iter-{iter_n}.md"
+        if not _nonempty_file(report):
+            return f"Live verifier produced no fresh non-empty report at {report}."
+        return ""
+    raise ValueError(f"unknown proof step: {step}")
+
+
 # ─────────────────────── flow ───────────────────────────────────────
 
 
@@ -532,6 +592,7 @@ def software_dev_agentic(
     )
 
     preview_mode = _resolve_preview_mode()
+    proof_mode = _resolve_proof_mode()
     preview_note = _preview_note(preview_mode, run_dir, _demo_video_requested())
 
     # Shared-branch epic mode: the worker branches off the epic tip and pushes
@@ -576,8 +637,9 @@ def software_dev_agentic(
         sizing = agentic_sizing.apply_operator_cap(
             agentic_sizing.read_sizing(run_dir), iter_cap
         )
-        delivery_plan = agentic_sizing.delivery_plan(
-            sizing, demo_enabled=_demo_video_requested()
+        delivery_plan = agentic_sizing.apply_proof_mode(
+            agentic_sizing.delivery_plan(sizing, demo_enabled=_demo_video_requested()),
+            proof_mode,
         )
         logger.info(
             "agentic: sizing decision=%s size=%s risk=%s budget=%s closed_by=%s",
@@ -598,6 +660,7 @@ def software_dev_agentic(
                     "provenance": provenance,
                 },
                 "delivery_plan": delivery_plan.as_dict(),
+                "proof_mode": proof_mode,
                 "changed_surfaces": list(sizing.surfaces),
                 "live_verification": {"plan": delivery_plan.steps()},
             },
@@ -729,6 +792,8 @@ def software_dev_agentic(
 
             # The sizing model owns semantic classification. Python only
             # executes the resulting proof plan and validates verdict shape.
+            _clear_phase_evidence(run_dir, delivery_plan)
+            (run_dir / f"verification-report-iter-{iter_n}.md").unlink(missing_ok=True)
             if delivery_plan.deploy_smoke:
                 smoke = agent_step(
                     agent_dir=_AGENTS_DIR / "deploy-smoke",
@@ -744,6 +809,13 @@ def software_dev_agentic(
                 _record_proof_result(
                     run_dir, step="deploy-smoke", iter_n=iter_n, result=smoke
                 )
+                smoke_failure = _proof_evidence_failure(
+                    run_dir, step="deploy-smoke", iter_n=iter_n
+                )
+                if smoke_failure:
+                    fix_list = smoke_failure
+                    logger.info("agentic: iter %s %s", iter_n, smoke_failure)
+                    continue
             if delivery_plan.demo:
                 _clear_demo_evidence(run_dir)
                 demo_error: Exception | None = None
@@ -796,6 +868,18 @@ def software_dev_agentic(
                     iter_n=iter_n,
                     result=artifacts,
                 )
+                artifact_failure = _proof_evidence_failure(
+                    run_dir,
+                    step="review-artifacts",
+                    iter_n=iter_n,
+                    require_overview=bool(
+                        {"workflow", "infrastructure"} & set(sizing.surface_types)
+                    ),
+                )
+                if artifact_failure:
+                    fix_list = artifact_failure
+                    logger.info("agentic: iter %s %s", iter_n, artifact_failure)
+                    continue
             if delivery_plan.live_verifier:
                 verification = agent_step(
                     agent_dir=_AGENTS_DIR / "verifier",
@@ -820,12 +904,16 @@ def software_dev_agentic(
                 logger.info(
                     "agentic: iter %s live-verifier=%s", iter_n, verifier_verdict
                 )
-                if verifier_verdict != "approved":
+                verification_failure = _proof_evidence_failure(
+                    run_dir, step="verify", iter_n=iter_n
+                )
+                if verifier_verdict != "approved" or verification_failure:
                     report = _read_text(
                         run_dir / f"verification-report-iter-{iter_n}.md"
                     )
                     fix_list = (
-                        report
+                        verification_failure
+                        or report
                         or verification.summary
                         or (
                             "Live verification rejected without a report. Reproduce "

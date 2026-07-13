@@ -39,3 +39,20 @@ foundation-only, missing-UI, and unintegrated-child cases to fail; and the real
 for the failed case. `report.json`, each model verdict, and the generated
 `epic-live-verification.md` / `critique-epic-acceptance.md` files are retained
 under the chosen output directory.
+
+## Verified-delivery dogfood
+
+`run_verified_delivery_dogfood.py` is the publish gate for the complete
+verified-delivery contract. It runs the decorated UI flow through a forced
+verifier rejection and retry, exercises strict backend proof selection, proves
+a shared child in a disposable git epic, starts a real localhost server for
+stale-preview rejection, and injects red smoke, wrong PR base, missing artifact,
+and stopped/resumed state.
+
+```bash
+uv run --project parent python \
+  parent/evals/run_verified_delivery_dogfood.py /tmp/verified-delivery-dogfood
+```
+
+The command exits non-zero on any failed scenario and retains `report.json`,
+`report.md`, the UI run directory, and disposable git fixtures for review.

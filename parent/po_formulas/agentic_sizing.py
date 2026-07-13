@@ -193,6 +193,25 @@ def delivery_plan(decision: SizingDecision, *, demo_enabled: bool) -> DeliveryPl
     )
 
 
+def apply_proof_mode(plan: DeliveryPlan, mode: str) -> DeliveryPlan:
+    """Apply the operator's proof-mode policy without reclassifying the work.
+
+    ``adaptive`` preserves the model-classified plan. ``strict`` requires a
+    reviewer package and live verification for every delivery; deploy smoke and
+    demo remain tied to the classified surface and the existing demo knob.
+    """
+    if mode == "adaptive":
+        return plan
+    if mode != "strict":
+        raise ValueError("proof mode must be 'adaptive' or 'strict'")
+    return DeliveryPlan(
+        review_artifacts=True,
+        live_verifier=True,
+        deploy_smoke=plan.deploy_smoke,
+        demo=plan.demo,
+    )
+
+
 def decomposition_message(issue_id: str, decision: SizingDecision) -> str:
     reason = decision.decomposition_reason or decision.rationale
     return (
@@ -226,6 +245,7 @@ __all__ = [
     "SizingContractError",
     "SizingDecision",
     "apply_operator_cap",
+    "apply_proof_mode",
     "decomposition_message",
     "delivery_plan",
     "read_sizing",
