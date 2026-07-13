@@ -226,7 +226,7 @@ not in the agentic dispatch.
 ## `agentic-epic` — PRD → plan-critic → one shared-branch PR
 
 `agentic-epic` takes one high-level epic goal and lands it as **one integration
-branch `epic/<epic-id>` + one draft PR**, via four phases:
+branch `epic/<epic-id>` + one PR**, via five phases:
 
 ```bash
 po run agentic-epic --epic-id <id> --rig <name> --rig-path <path>
@@ -245,8 +245,17 @@ po run agentic-epic --epic-id <id> --rig <name> --rig-path <path>
    gates the exact defect that bites: two children editing the same file left
    unordered.
 4. **Dispatch** — the flow creates the children (each stamped with its resolved
-   formula), wires `blocks` edges, cuts the `epic/<id>` branch off `main`, opens
-   a single **draft** PR, and fans the children out through `graph_run`.
+   formula), wires `blocks` edges, cuts the `epic/<id>` branch off `main`, and
+   fans the children out through `graph_run`. No PR is exposed yet.
+5. **Integrated acceptance** — after integration, the flow pins the assembled
+   SHA and writes `<run_dir>/acceptance-manifest.json` from every planned
+   child's `verified-delivery.json`. One acceptance role maps every PRD criterion
+   to that evidence and the integrated diff, then exercises the relevant live
+   behavior once on the assembled whole. Missing artifacts, dropped children,
+   and ancestry mismatches fail closed. A failure may dispatch at most
+   `acceptance_fix_cap` bounded repair children (default 2), rebuilding and
+   rechecking the manifest after each. The epic PR opens ready only on PASS;
+   exhausted acceptance opens it as draft and leaves the epic open.
 
 Per-child mechanics in shared-branch mode:
 
@@ -260,7 +269,8 @@ Per-child mechanics in shared-branch mode:
   never race the shared ref). The merge is clean because coupled children are
   `blocks`-ordered and never run concurrently; a conflict aborts cleanly and is
   reported (rare, not routine).
-- **Finalize:** the draft PR is flipped to ready for human / PR-sheriff review.
+- **Finalize:** the single PR is created ready for human / PR-sheriff review
+  only after integrated acceptance passes.
 
 No remote / no `gh` → the branch + commits are left for a human to PR (graceful
 no-op, never a hard failure).
