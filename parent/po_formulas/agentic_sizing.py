@@ -18,6 +18,19 @@ MAX_ITERATIONS = 4
 _DECISIONS = {"proceed", "decompose"}
 _SIZES = {"trivial", "small", "medium", "large", "oversized"}
 _RISKS = {"low", "medium", "high"}
+_SURFACE_TYPES = {
+    "api",
+    "cli",
+    "code",
+    "data",
+    "docs",
+    "infrastructure",
+    "service",
+    "ui",
+    "workflow",
+}
+_LIVE_SURFACE_TYPES = _SURFACE_TYPES - {"code", "docs"}
+_DEPLOY_SURFACE_TYPES = {"api", "data", "infrastructure", "service", "ui"}
 
 
 class SizingContractError(ValueError):
@@ -37,6 +50,7 @@ class SizingDecision:
     iteration_budget: int
     rationale: str
     decomposition_reason: str
+    surface_types: tuple[str, ...] = ("code",)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -47,7 +61,29 @@ class SizingDecision:
             "iteration_budget": self.iteration_budget,
             "rationale": self.rationale,
             "decomposition_reason": self.decomposition_reason,
+            "surface_types": list(self.surface_types),
         }
+
+
+@dataclass(frozen=True)
+class DeliveryPlan:
+    """Mechanically derived proof phases for a model-classified delivery."""
+
+    review_artifacts: bool
+    live_verifier: bool
+    deploy_smoke: bool
+    demo: bool
+
+    def as_dict(self) -> dict[str, bool]:
+        return {
+            "review_artifacts": self.review_artifacts,
+            "live_verifier": self.live_verifier,
+            "deploy_smoke": self.deploy_smoke,
+            "demo": self.demo,
+        }
+
+    def steps(self) -> list[str]:
+        return [name for name, enabled in self.as_dict().items() if enabled]
 
 
 def read_sizing(run_dir: Path) -> SizingDecision:
@@ -86,6 +122,19 @@ def read_sizing(run_dir: Path) -> SizingDecision:
     decomposition_reason = raw.get("decomposition_reason", "")
     if not isinstance(decomposition_reason, str):
         raise SizingContractError("decomposition_reason must be a string")
+    surface_types_raw = raw.get("surface_types", ["code"])
+    if (
+        not isinstance(surface_types_raw, list)
+        or not surface_types_raw
+        or not all(
+            isinstance(value, str) and value in _SURFACE_TYPES
+            for value in surface_types_raw
+        )
+    ):
+        options = ", ".join(sorted(_SURFACE_TYPES))
+        raise SizingContractError(
+            f"surface_types must be a non-empty list containing only: {options}"
+        )
 
     return SizingDecision(
         decision=decision,
@@ -95,6 +144,7 @@ def read_sizing(run_dir: Path) -> SizingDecision:
         iteration_budget=iteration_budget,
         rationale=rationale,
         decomposition_reason=decomposition_reason.strip(),
+        surface_types=tuple(dict.fromkeys(surface_types_raw)),
     )
 
 
@@ -120,6 +170,26 @@ def apply_operator_cap(
         iteration_budget=payload["iteration_budget"],
         rationale=payload["rationale"],
         decomposition_reason=payload["decomposition_reason"],
+        surface_types=tuple(payload["surface_types"]),
+    )
+
+
+def delivery_plan(decision: SizingDecision, *, demo_enabled: bool) -> DeliveryPlan:
+    """Translate model judgment into the phases required by operator policy.
+
+    The model owns semantic classification through ``risk`` and
+    ``surface_types``. This function only applies declared proof policy: live
+    surfaces and medium/high-risk changes require live verification; deployable
+    surfaces require a smoke exercise; UI always requires live artifacts and
+    gets a demo when the rig enables demo capture.
+    """
+    kinds = set(decision.surface_types)
+    needs_live = bool(kinds & _LIVE_SURFACE_TYPES) or decision.risk != "low"
+    return DeliveryPlan(
+        review_artifacts=needs_live,
+        live_verifier=needs_live,
+        deploy_smoke=bool(kinds & _DEPLOY_SURFACE_TYPES),
+        demo="ui" in kinds and demo_enabled,
     )
 
 
@@ -149,6 +219,7 @@ def _text(raw: dict[str, Any], key: str) -> str:
 
 __all__ = [
     "DecompositionRequiredError",
+    "DeliveryPlan",
     "MAX_ITERATIONS",
     "MIN_ITERATIONS",
     "SIZING_FILE",
@@ -156,5 +227,6 @@ __all__ = [
     "SizingDecision",
     "apply_operator_cap",
     "decomposition_message",
+    "delivery_plan",
     "read_sizing",
 ]

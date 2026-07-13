@@ -449,6 +449,114 @@ def test_flow_outcome_written_on_worker_exception(
     assert data["exception_class"] == "RuntimeError"
 
 
+def test_ui_delivery_runs_complete_live_proof_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+    closed: list[str] = []
+
+    def fake(**kwargs: object) -> AgentStepResult:
+        calls.append(dict(kwargs))
+        step = kwargs["step"]
+        verdicts = {"review": "pass", "verify": "approved"}
+        return AgentStepResult(
+            bead_id=f"seed-{step}",
+            verdict=verdicts.get(str(step), "complete"),
+            closed_by="agent",
+        )
+
+    monkeypatch.setenv("PO_DEMO_VIDEO", "1")
+    monkeypatch.setattr(ag, "agent_step", fake)
+    _patch_common(monkeypatch, closed)
+    monkeypatch.setattr(
+        ag.agentic_sizing,
+        "read_sizing",
+        lambda run_dir: ag.agentic_sizing.SizingDecision(
+            "proceed", "medium", "medium", ("web UI",), 1, "Scoped.", "", ("ui",)
+        ),
+    )
+    rig = tmp_path / "rig"
+    rig.mkdir()
+
+    result = ag.software_dev_agentic.fn(
+        issue_id="seed-ui", rig="rig", rig_path=str(rig), iter_cap=1
+    )
+
+    assert [call["step"] for call in calls] == [
+        "sizing",
+        "agentic",
+        "review",
+        "deploy-smoke",
+        "demo-video",
+        "review-artifacts",
+        "verify",
+    ]
+    assert result["verifier_verdict"] == "approved"
+    assert result["delivery_plan"] == {
+        "review_artifacts": True,
+        "live_verifier": True,
+        "deploy_smoke": True,
+        "demo": True,
+    }
+    assert closed == ["seed-ui"]
+
+
+def test_verifier_rejection_returns_report_to_actor_and_reverifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+    closed: list[str] = []
+    verify_verdicts = iter(("rejected", "approved"))
+    rig = tmp_path / "rig"
+    run_dir = rig / ".planning/software-dev-agentic/seed-live"
+    run_dir.mkdir(parents=True)
+
+    def fake(**kwargs: object) -> AgentStepResult:
+        calls.append(dict(kwargs))
+        step = kwargs["step"]
+        if step == "review":
+            verdict = "pass"
+        elif step == "verify":
+            verdict = next(verify_verdicts)
+            if verdict == "rejected":
+                (run_dir / "verification-report-iter-1.md").write_text(
+                    "Live API returned the old response shape."
+                )
+        else:
+            verdict = "complete"
+        return AgentStepResult(
+            bead_id=f"seed-{step}", verdict=verdict, closed_by="agent"
+        )
+
+    monkeypatch.setattr(ag, "agent_step", fake)
+    _patch_common(monkeypatch, closed)
+    monkeypatch.setattr(
+        ag.agentic_sizing,
+        "read_sizing",
+        lambda run_dir: ag.agentic_sizing.SizingDecision(
+            "proceed",
+            "medium",
+            "medium",
+            ("workflow",),
+            2,
+            "Scoped.",
+            "",
+            ("workflow",),
+        ),
+    )
+
+    ag.software_dev_agentic.fn(
+        issue_id="seed-live", rig="rig", rig_path=str(rig), iter_cap=2
+    )
+
+    worker_calls = [call for call in calls if call["step"] == "agentic"]
+    assert len(worker_calls) == 2
+    assert "old response shape" in worker_calls[1]["ctx"]["revision_note"]
+    assert [call["step"] for call in calls].count("verify") == 2
+    assert [call["step"] for call in calls].count("review-artifacts") == 2
+    assert closed == ["seed-live"]
+
+
 # ─────────────────────── _dispatch_pr_sheriff (diagnosability) ───────
 #
 # Every outcome of the PR-sheriff dispatch must leave a log line so a stuck
