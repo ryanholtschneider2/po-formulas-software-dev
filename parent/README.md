@@ -47,7 +47,7 @@ before code lands. **Use fast when:** static-text changes, registry
 entries, single-component features, doc-only changes, focused bug fixes.
 When in doubt, full.
 
-## `software-dev-agentic` — one prompt-driven actor + one goal critic
+## `software-dev-agentic` — adaptive actor, review, and live proof
 
 ```bash
 po run software-dev-agentic \
@@ -57,15 +57,19 @@ po run software-dev-agentic \
 ```
 
 The prompt-over-code variant starts with a **structured sizing judgment**, then
-runs essentially **one actor prompt + one critic**. The sizing agent reads the
-actual bead and relevant code context, writes an auditable `sizing.json`, and
+runs one actor against a bounded sequence of semantic reviewers. The sizing
+agent reads the actual bead and relevant code context, writes an auditable
+`sizing.json`, and
 chooses whether the work is one PR-sized unit plus a bounded 1–4 iteration
 budget. The actor agent is prompted (not orchestrator-wired) to open a
 worktree off `main`, implement the feature there, run the repo's own
 tests / CI, and **open a PR** when it's done. Then **exactly one critic
 agent** verifies *goal accomplishment* — did the actor implement the
-request faithfully? — and returns `pass` / `fail`. On `fail` the critic
-writes a concrete fix list and the actor iterates against it.
+request faithfully? — and returns `pass` / `fail`. For live, deployable, or
+medium/high-risk changes, that diff review is followed by the applicable
+deploy smoke, demo, review-artifact assembly, and live verifier. A rejection
+from either reviewer writes a concrete fix list and the actor reruns the whole
+proof chain after addressing it.
 
 Oversized multi-surface goals are refused before the worker starts. The error
 points the operator to `po run agentic-epic`, whose planner can turn the goal
@@ -76,17 +80,45 @@ declared budget boundary.
 Pipeline:
 
 ```
-sizing: proceed + budget | decompose → loop(actor: worktree → build → test → PR  →  critic: pass | fail) → close
+sizing: proceed + budget | decompose
+  → loop(actor → diff critic → smoke/demo/artifacts → live verifier)
+  → close
 ```
 
-There is **no mechanical gate layer**: running tests and opening the PR
-are the actor's job, and the goal-verifying critic is the only gate that
-matters. The flow **never auto-merges** — the actor leaves a PR for human
-review. The seed closes iff the critic passes, and the *flow* (not the
+Running tests and opening the PR remain the actor's responsibility. The flow
+**never auto-merges** — the actor leaves a PR for human review. The seed closes
+only after every required semantic reviewer passes, and the *flow* (not the
 actor) performs the close (the actor only ever closes its own iter bead).
 If it doesn't converge within the selected budget the flow raises and
 leaves run-dir artifacts at `<rig>/.planning/software-dev-agentic/<issue>/`
 for forensics.
+
+The sizing artifact includes both human-readable `surfaces` and typed
+`surface_types`. The model makes that semantic classification; Python only
+validates the enum and applies operator proof policy:
+
+| Classified delivery | Required post-review proof |
+|---|---|
+| Low-risk `code` / `docs` only | None; preserves the fast actor/critic path |
+| `workflow`, `cli`, or any medium/high risk | Review package + live verifier |
+| `api`, `data`, `infrastructure`, `service`, or `ui` | Deploy smoke + review package + live verifier |
+| `ui` with `PO_DEMO_VIDEO=1` | The above plus demo-video |
+
+UI therefore cannot pass from a diff alone. Proof-role results, discovered
+screenshots, and the demo path are appended to `verified-delivery.json`. A
+verifier rejection is fed to the next actor iteration and all required proof
+phases run again, preventing stale evidence from substituting for a retest.
+When demo capture is enabled for UI, the flow clears any prior demo before the
+role runs and requires a new, non-empty `review-artifacts/demo.mp4`; a skip,
+missing file, or role error returns to the actor and cannot reach approval.
+
+Exercise the decorated Prefect topology with a controlled live rejection and
+retry (without touching the shared PO installation):
+
+```bash
+cd parent
+uv run python evals/run_agentic_proof_smoke.py /tmp/agentic-proof-smoke
+```
 
 ### Verified-delivery artifact
 

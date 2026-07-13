@@ -72,7 +72,7 @@ def _patch_flow(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     def fake_step(**kwargs: object) -> AgentStepResult:
         step = str(kwargs["step"])
         calls.append(step)
-        verdict = "pass" if step == "review" else "complete"
+        verdict = {"review": "pass", "verify": "approved"}.get(step, "complete")
         return AgentStepResult(bead_id=f"iter-{step}", verdict=verdict)
 
     monkeypatch.setattr(ag, "agent_step", fake_step)
@@ -108,7 +108,7 @@ def test_sizing_precedes_worker_and_budget_is_recorded(
         issue_id="seed", rig="rig", rig_path=str(tmp_path), pack_path=str(tmp_path)
     )
 
-    assert calls == ["sizing", "agentic", "review"]
+    assert calls == ["sizing", "agentic", "review", "review-artifacts", "verify"]
     assert result["verified_delivery"]["sizing"]["iteration_budget"] == 3
 
 
@@ -159,3 +159,41 @@ def test_scale_failure_eval_corpus_pins_courtpro_storybook_and_trivial() -> None
     assert cases["trivial-doc-fix"]["expected_budget"] == [1]
     assert cases["courtpro-full-product-rebuild"]["expected_decision"] == "decompose"
     assert cases["storybook-owner-journey-rebuild"]["expected_decision"] == "decompose"
+
+
+@pytest.mark.parametrize(
+    ("surface_types", "risk", "demo_enabled", "expected"),
+    [
+        (("code",), "low", False, (False, False, False, False)),
+        (("workflow",), "low", False, (True, True, False, False)),
+        (("api",), "low", False, (True, True, True, False)),
+        (("ui",), "low", True, (True, True, True, True)),
+        (("code",), "high", False, (True, True, False, False)),
+    ],
+)
+def test_delivery_plan_applies_declared_proof_policy(
+    surface_types: tuple[str, ...],
+    risk: str,
+    demo_enabled: bool,
+    expected: tuple[bool, bool, bool, bool],
+) -> None:
+    decision = sizing.SizingDecision(
+        "proceed", "small", risk, ("feature",), 1, "Scoped.", "", surface_types
+    )
+
+    plan = sizing.delivery_plan(decision, demo_enabled=demo_enabled)
+
+    assert (
+        plan.review_artifacts,
+        plan.live_verifier,
+        plan.deploy_smoke,
+        plan.demo,
+    ) == expected
+    assert plan.steps() == [name for name, enabled in plan.as_dict().items() if enabled]
+
+
+def test_read_sizing_rejects_unknown_surface_type(tmp_path: Path) -> None:
+    _write(tmp_path, surface_types=["magic"])
+
+    with pytest.raises(sizing.SizingContractError, match="surface_types"):
+        sizing.read_sizing(tmp_path)

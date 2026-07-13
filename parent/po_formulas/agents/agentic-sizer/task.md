@@ -10,6 +10,7 @@ You are sizing seed issue `{{seed_id}}` before any implementation worker is disp
   "size": "medium",
   "risk": "medium",
   "surfaces": ["API", "tests"],
+  "surface_types": ["api", "code"],
   "iteration_budget": 2,
   "rationale": "Why this is or is not one coherent PR-sized delivery.",
   "decomposition_reason": "Empty when proceeding; when decomposing, explain the independent product or code slices."
@@ -23,6 +24,11 @@ Allowed values:
 - `risk`: `low`, `medium`, or `high`
 - `iteration_budget`: integer 1 through 4
 - `surfaces`: non-empty strings naming the affected user/system surfaces
+- `surface_types`: one or more of `api`, `cli`, `code`, `data`, `docs`,
+  `infrastructure`, `service`, `ui`, or `workflow`. This semantic classification
+  controls the proof phases after review: live surfaces get artifacts and a
+  live verifier; deployable surfaces get deploy-smoke; UI can never pass on a
+  diff review alone and gets a demo when the rig enables demo capture.
 
 Budget guidance is contextual, not a formula: use 1 for work that should complete in one careful pass; 2 for ordinary scoped PR work; 3–4 only when a coherent PR has meaningful integration or risk. If the goal contains multiple independently shippable surfaces that need their own acceptance proof, choose `decompose` instead of inflating the budget.
 

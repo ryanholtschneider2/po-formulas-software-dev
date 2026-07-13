@@ -3,16 +3,17 @@
 A prompt-driven, minimal pipeline: **one actor agent** owns the whole
 implementation loop and is told — in its prompt, not in orchestrator-wired
 Python — to open a worktree off ``main``, implement the feature there, run
-the repo's own tests / CI, and **open a PR** when it's done. Then **exactly
-one critic agent** verifies *goal accomplishment*: did the actor implement
-the requested feature faithfully per the request? If not, the critic returns
-a concrete fix list and the actor iterates (the actor-critic goal loop).
+the repo's own tests / CI, and **open a PR** when it's done. A goal critic
+checks the diff. For changes whose model-authored sizing declares live or
+deployable surfaces, the flow then runs the applicable smoke, demo,
+review-artifact, and live-verifier roles. Any failed semantic verification
+returns a concrete fix list to the same actor.
 
-There is no mechanical gate layer — running tests and opening the PR are the
-actor's job (prompt-driven), and the critic is the only gate that matters.
-The flow does **not** auto-merge: the actor leaves a PR for human review.
-The *flow* (machine) performs the seed close on a critic pass; the actor
-never closes its own seed.
+Running tests and opening the PR remain the actor's job (prompt-driven).
+Python only transports the model-authored proof plan between semantic roles;
+the reviewers judge quality. The flow does **not** auto-merge: the actor leaves
+a PR for human review. The *flow* performs the seed close after all required
+reviewers pass; the actor never closes its own seed.
 
 Pipeline::
 
@@ -20,9 +21,10 @@ Pipeline::
       → loop iter in 1..iter_cap:
             agent_step(agentic-worker)   (worktree off main → build → test → PR)
             agent_step(agentic-reviewer) (goal-accomplishment critic: pass | fail)
-            if critic == pass: success
+            if critic == pass: run sizing-selected proof phases
+            if verifier == approved (or not required): success
             else: feed the fix list back to the worker and iterate
-      → close_issue(seed)  on a critic pass, else raise (forensics)
+      → close_issue(seed)  after all required reviewers pass, else raise
 
 All the convergence machinery (bead-stamping, session affinity, nudge
 ladder, verdict parsing, cache fast-path, run_dir, ``_record_flow_outcome``)
@@ -375,6 +377,68 @@ def _stamp_preview_url(issue_id: str, rig_path: Path, run_dir: Path) -> str:
     return url
 
 
+def _record_proof_result(run_dir: Path, *, step: str, iter_n: int, result: Any) -> None:
+    """Append one role result and discover its concrete review artifacts."""
+    contract = verified_delivery.read(run_dir)
+    results = list(contract["live_verification"]["results"])
+    results.append(
+        {
+            "step": step,
+            "iteration": iter_n,
+            "verdict": result.verdict,
+            "bead_id": result.bead_id,
+        }
+    )
+    review_dir = run_dir / "review-artifacts"
+    screenshots = [
+        {"path": str(path), "iteration": iter_n}
+        for path in sorted(review_dir.glob("*.png"))
+    ]
+    patch: dict[str, Any] = {
+        "live_verification": {"results": results},
+        "screenshots": screenshots,
+    }
+    demo_path = review_dir / "demo.mp4"
+    if demo_path.is_file():
+        patch["demo"] = {"path": str(demo_path)}
+    verified_delivery.update(run_dir, patch)
+
+
+def _clear_demo_evidence(run_dir: Path) -> None:
+    """Remove prior demo bytes so a retry must prove the current iteration."""
+    (run_dir / "demo.mp4").unlink(missing_ok=True)
+    (run_dir / "review-artifacts" / "demo.mp4").unlink(missing_ok=True)
+
+
+def _demo_evidence_failure(
+    run_dir: Path, *, verdict: str = "", error: Exception | None = None
+) -> str:
+    """Return a concrete revision note when required demo proof is absent."""
+    if error is not None:
+        return (
+            "Required UI demo proof failed to run: "
+            f"{error}. Fix the demo/runtime failure and produce a non-empty "
+            f"{run_dir / 'review-artifacts' / 'demo.mp4'}."
+        )
+    demo_path = run_dir / "review-artifacts" / "demo.mp4"
+    if verdict != "recorded":
+        return (
+            f"Required UI demo proof returned {verdict or 'no verdict'} instead "
+            f"of recorded. Produce a non-empty current demo at {demo_path}."
+        )
+    try:
+        has_bytes = demo_path.stat().st_size > 0
+    except OSError:
+        has_bytes = False
+    if has_bytes:
+        return ""
+    return (
+        "Required UI demo proof was skipped or missing. Produce a non-empty "
+        f"demo for the current iteration at {demo_path}; stale evidence from "
+        "an earlier iteration does not count."
+    )
+
+
 # ─────────────────────── flow ───────────────────────────────────────
 
 
@@ -394,14 +458,13 @@ def software_dev_agentic(
 ) -> dict[str, Any]:
     """One prompt-driven actor looped against one goal-verifying critic.
 
-    A sizing agent first judges whether the seed is one PR-sized unit and
-    selects a bounded actor/critic budget. The worker agent is then prompted to
-    work in a worktree off ``main``, run the
-    repo's own tests / CI, and open a PR (none of which is orchestrator-wired
-    code). The critic then verifies that the change faithfully accomplishes
-    the request and returns ``pass`` / ``fail`` (with a concrete fix list on
-    fail). The seed closes iff the critic passes — and the flow, never the
-    worker, performs the close. The flow never merges to ``main``.
+    A sizing agent first judges whether the seed is one PR-sized unit, selects
+    a bounded iteration budget, and classifies its delivery surfaces. The
+    worker opens a worktree, implements, tests, and opens a PR. A diff critic
+    checks goal accomplishment; live/deployable surfaces then run the proof
+    phases selected from sizing. Any critic or verifier rejection returns to
+    the worker. The flow closes the seed only after every required reviewer
+    passes and never merges to ``main``.
 
     Parameters mirror the ``software_dev_full`` subset that fanout
     dispatchers care about (``issue_id`` / ``rig`` / ``rig_path`` plus
@@ -513,6 +576,9 @@ def software_dev_agentic(
         sizing = agentic_sizing.apply_operator_cap(
             agentic_sizing.read_sizing(run_dir), iter_cap
         )
+        delivery_plan = agentic_sizing.delivery_plan(
+            sizing, demo_enabled=_demo_video_requested()
+        )
         logger.info(
             "agentic: sizing decision=%s size=%s risk=%s budget=%s closed_by=%s",
             sizing.decision,
@@ -530,7 +596,10 @@ def software_dev_agentic(
                     **sizing.as_dict(),
                     "operator_iter_cap": iter_cap,
                     "provenance": provenance,
-                }
+                },
+                "delivery_plan": delivery_plan.as_dict(),
+                "changed_surfaces": list(sizing.surfaces),
+                "live_verification": {"plan": delivery_plan.steps()},
             },
         )
         if sizing.decision == "decompose":
@@ -539,6 +608,7 @@ def software_dev_agentic(
             )
 
         critic_verdict = ""
+        verifier_verdict = "not-required"
         fix_list = ""
         success = False
         for iter_n in range(1, sizing.iteration_budget + 1):
@@ -653,11 +723,119 @@ def software_dev_agentic(
                 critic_verdict = "pass"
             logger.info("agentic: iter %s critic=%s", iter_n, critic_verdict)
 
-            if critic_verdict == "pass":
-                success = True
-                break
-            # Critic failed → read its fix list for the next worker turn.
-            fix_list = _read_text(run_dir / f"critique-iter-{iter_n}.md")
+            if critic_verdict != "pass":
+                fix_list = _read_text(run_dir / f"critique-iter-{iter_n}.md")
+                continue
+
+            # The sizing model owns semantic classification. Python only
+            # executes the resulting proof plan and validates verdict shape.
+            if delivery_plan.deploy_smoke:
+                smoke = agent_step(
+                    agent_dir=_AGENTS_DIR / "deploy-smoke",
+                    task=_AGENTS_DIR / "deploy-smoke" / "task.md",
+                    seed_id=issue_id,
+                    rig_path=str(rig_path_p),
+                    run_dir=run_dir,
+                    step="deploy-smoke",
+                    iter_n=iter_n,
+                    ctx={"issue_id": issue_id, "pack_path": str(pack_path_p)},
+                    dry_run=dry_run,
+                )
+                _record_proof_result(
+                    run_dir, step="deploy-smoke", iter_n=iter_n, result=smoke
+                )
+            if delivery_plan.demo:
+                _clear_demo_evidence(run_dir)
+                demo_error: Exception | None = None
+                try:
+                    demo = agent_step(
+                        agent_dir=_AGENTS_DIR / "demo-video",
+                        task=_AGENTS_DIR / "demo-video" / "task.md",
+                        seed_id=issue_id,
+                        rig_path=str(rig_path_p),
+                        run_dir=run_dir,
+                        step="demo-video",
+                        iter_n=iter_n,
+                        ctx={"issue_id": issue_id},
+                        verdict_keywords=("recorded", "skipped", "failed"),
+                        dry_run=dry_run,
+                    )
+                    _record_proof_result(
+                        run_dir, step="demo-video", iter_n=iter_n, result=demo
+                    )
+                except Exception as exc:  # noqa: BLE001 - proof failure retries actor
+                    demo_error = exc
+                demo_failure = _demo_evidence_failure(
+                    run_dir,
+                    verdict="" if demo_error is not None else demo.verdict,
+                    error=demo_error,
+                )
+                if demo_failure:
+                    fix_list = demo_failure
+                    logger.info(
+                        "agentic: iter %s required demo failed: %s",
+                        iter_n,
+                        demo_failure,
+                    )
+                    continue
+            if delivery_plan.review_artifacts:
+                artifacts = agent_step(
+                    agent_dir=_AGENTS_DIR / "review-artifacts",
+                    task=_AGENTS_DIR / "review-artifacts" / "task.md",
+                    seed_id=issue_id,
+                    rig_path=str(rig_path_p),
+                    run_dir=run_dir,
+                    step="review-artifacts",
+                    iter_n=iter_n,
+                    ctx={"issue_id": issue_id},
+                    dry_run=dry_run,
+                )
+                _record_proof_result(
+                    run_dir,
+                    step="review-artifacts",
+                    iter_n=iter_n,
+                    result=artifacts,
+                )
+            if delivery_plan.live_verifier:
+                verification = agent_step(
+                    agent_dir=_AGENTS_DIR / "verifier",
+                    task=_AGENTS_DIR / "verifier" / "task.md",
+                    seed_id=issue_id,
+                    rig_path=str(rig_path_p),
+                    run_dir=run_dir,
+                    step="verify",
+                    iter_n=iter_n,
+                    ctx={
+                        "verify_iter": iter_n,
+                        "prior_critique": fix_list,
+                        "pack_path": str(pack_path_p),
+                    },
+                    verdict_keywords=("approved", "rejected"),
+                    dry_run=dry_run,
+                )
+                verifier_verdict = "approved" if dry_run else verification.verdict
+                _record_proof_result(
+                    run_dir, step="verify", iter_n=iter_n, result=verification
+                )
+                logger.info(
+                    "agentic: iter %s live-verifier=%s", iter_n, verifier_verdict
+                )
+                if verifier_verdict != "approved":
+                    report = _read_text(
+                        run_dir / f"verification-report-iter-{iter_n}.md"
+                    )
+                    fix_list = (
+                        report
+                        or verification.summary
+                        or (
+                            "Live verification rejected without a report. Reproduce "
+                            "the live failure and provide complete evidence."
+                        )
+                    )
+                    continue
+
+            success = True
+            break
 
         if not success:
             # Leave the seed open and raise for forensics — run_dir artifacts
@@ -766,6 +944,8 @@ def software_dev_agentic(
         return {
             "status": "completed",
             "critic_verdict": critic_verdict,
+            "verifier_verdict": verifier_verdict,
+            "delivery_plan": delivery_plan.as_dict(),
             "preview_url": preview_url,
             "integration": integration,
             "verified_delivery": contract,
