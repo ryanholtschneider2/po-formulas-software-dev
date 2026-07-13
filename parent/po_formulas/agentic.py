@@ -44,7 +44,9 @@ stamps ``po.run_dir``) so dashboard cards can link the preview.
 from __future__ import annotations
 
 import importlib
+import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -54,6 +56,7 @@ from prefect_orchestration.agent_step import agent_step
 from prefect_orchestration.beads_meta import claim_issue, close_issue
 
 from po_formulas import shared_branch
+from po_formulas import verified_delivery
 from po_formulas.software_dev import (
     _load_rig_env,
     _record_flow_outcome,
@@ -121,6 +124,60 @@ def _read_text(path: Path) -> str:
         return path.read_text()
     except OSError:
         return ""
+
+
+def _git_revision(repo: Path, revision: str = "HEAD") -> str | None:
+    """Resolve *revision* in *repo*, returning no opinion outside a git tree."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", revision],
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    stdout = getattr(result, "stdout", "")
+    return stdout.strip() if result.returncode == 0 and stdout.strip() else None
+
+
+def _dispatch_provenance(
+    run_dir: Path, rig: str, rig_path: Path, pack_path: Path, parent_epic: str | None
+) -> dict[str, Any]:
+    """Collect the exact runtime tuple, preferring the dispatch artifact."""
+    dispatch: dict[str, Any] = {}
+    try:
+        loaded = json.loads((run_dir / ".po-dispatch.json").read_text())
+        if isinstance(loaded, dict):
+            dispatch = loaded
+    except (OSError, json.JSONDecodeError):
+        pass
+    runtime = dispatch.get("runtime_env")
+    runtime = runtime if isinstance(runtime, dict) else {}
+    argv = dispatch.get("argv")
+    command = (
+        shlex.join(str(part) for part in argv)
+        if isinstance(argv, list)
+        else os.environ.get("PO_DISPATCH_COMMAND")
+    )
+    return {
+        "formula": dispatch.get("formula", "software-dev-agentic"),
+        "backend": runtime.get("PO_BACKEND", os.environ.get("PO_BACKEND")),
+        "provider": runtime.get("PO_PROVIDER", os.environ.get("PO_PROVIDER", "codex")),
+        "account": runtime.get("PO_ACCOUNT", os.environ.get("PO_ACCOUNT")),
+        "account_class": runtime.get(
+            "PO_ACCOUNT_CLASS", os.environ.get("PO_ACCOUNT_CLASS")
+        ),
+        "model": runtime.get("PO_MODEL_CLI", os.environ.get("PO_MODEL_CLI")),
+        "effort": runtime.get("PO_EFFORT_CLI", os.environ.get("PO_EFFORT_CLI")),
+        "rig": rig,
+        "rig_path": str(rig_path),
+        "pack_path": str(pack_path),
+        "parent_epic": parent_epic,
+        "flow_run_id": os.environ.get("PREFECT__FLOW_RUN_ID"),
+        "dispatch_command": command,
+    }
 
 
 # ───────────────────── preview / demo knobs ─────────────────────────
@@ -369,6 +426,19 @@ def software_dev_agentic(
     _load_rig_env(rig_path_p)
     _tag_flow_run_with_issue_id(issue_id, logger)
 
+    provenance = _dispatch_provenance(
+        run_dir, rig, rig_path_p, pack_path_p, parent_epic_id or parent_bead
+    )
+    verified_delivery.initialize(
+        run_dir,
+        provenance=provenance,
+        base=_git_revision(pack_path_p, base_branch) or base_branch,
+    )
+    verified_delivery.update(
+        run_dir,
+        {"pull_request": {"target": base_branch}},
+    )
+
     preview_mode = _resolve_preview_mode()
     preview_note = _preview_note(preview_mode, run_dir, _demo_video_requested())
 
@@ -510,6 +580,26 @@ def software_dev_agentic(
                 rig_path=rig_path_p,
             )
 
+        # The flow runs from the pack's main checkout while the worker commits
+        # in its isolated branch. HEAD here would report the unchanged rig.
+        worker_branch = shared_branch.child_branch_name(issue_id)
+        head_revision = _git_revision(pack_path_p, worker_branch)
+        delivery_patch: dict[str, Any] = {
+            "revisions": {"head": head_revision},
+            "terminal": {"state": "completed", "reason": None},
+        }
+        if integration and integration.get("merged"):
+            integration_repo = shared_branch.ensure_integration_worktree(
+                rig_path_p, parent_epic_id or parent_bead or issue_id
+            )
+            delivery_patch["revisions"]["integration"] = _git_revision(integration_repo)
+        if preview_url:
+            delivery_patch["preview"] = {
+                "url": preview_url,
+                "revision": head_revision,
+            }
+        contract = verified_delivery.update(run_dir, delivery_patch)
+
         # Per-child-PR mode only: the worker's PR is open and the critic passed,
         # so announce the PR to po-director, which fires the PR Sheriff iff the
         # workspace is in an auto merge mode. Shared-branch children open no PR
@@ -522,8 +612,26 @@ def software_dev_agentic(
             "critic_verdict": critic_verdict,
             "preview_url": preview_url,
             "integration": integration,
+            "verified_delivery": contract,
         }
     except Exception as exc:
+        try:
+            verified_delivery.update(
+                run_dir,
+                {
+                    "revisions": {
+                        "head": _git_revision(
+                            pack_path_p, shared_branch.child_branch_name(issue_id)
+                        )
+                    },
+                    "terminal": {"state": "failed", "reason": str(exc)},
+                },
+            )
+        except Exception as artifact_exc:  # noqa: BLE001 — preserve flow failure
+            logger.error(
+                "agentic: could not terminalize verified-delivery artifact (%s)",
+                artifact_exc,
+            )
         _record_flow_outcome(run_dir, exc, issue_id, str(rig_path_p))
         raise
 

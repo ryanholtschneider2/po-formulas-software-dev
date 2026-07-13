@@ -79,6 +79,36 @@ If it doesn't converge within `--iter-cap` iterations the flow raises and
 leaves run-dir artifacts at `<rig>/.planning/software-dev-agentic/<issue>/`
 for forensics.
 
+### Verified-delivery artifact
+
+Every run creates
+`<rig>/.planning/software-dev-agentic/<issue>/verified-delivery.json`. This
+versioned artifact is the backend-independent contract between the actor flow
+and later verifier, deploy-smoke, demo, epic-acceptance, and dashboard phases.
+The run directory is authoritative because beads-rust does not support
+arbitrary metadata; older flat bead-metadata keys remain accepted when a
+consumer normalizes legacy records.
+
+The v1 shape records:
+
+- base, head, and assembled integration SHAs;
+- PR number, URL, and target branch;
+- acceptance criteria and changed surfaces;
+- live-verification plans and results;
+- preview URL and served revision, screenshot records, and demo path/URL;
+- explicit deferrals and terminal state/reason; and
+- the exact formula, backend, provider, account, account class, model, effort,
+  rig paths, parent epic, flow-run ID, and dispatch command when available.
+
+Producers should call `po_formulas.verified_delivery.update(run_dir, patch)`.
+Nested objects are deep-merged while lists and scalars replace prior values, so
+each phase can enrich its owned section without erasing other evidence. Writes
+use a flushed same-directory temporary file plus atomic replacement; consumers
+should call `read(run_dir)`, which fills absent v1 fields, imports supported
+legacy metadata shapes, and retains unknown keys for forward compatibility.
+Malformed JSON and unsupported schema versions fail explicitly rather than
+silently downgrading evidence.
+
 **Knobs:**
 
 | Flag | Default | Effect |
