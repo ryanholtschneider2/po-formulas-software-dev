@@ -109,6 +109,16 @@ legacy metadata shapes, and retains unknown keys for forward compatibility.
 Malformed JSON and unsupported schema versions fail explicitly rather than
 silently downgrading evidence.
 
+Before semantic review, the agentic flow now resolves the requested base,
+worker head, PR head/base, and (when present) localhost preview process from the
+real git/GitHub/process state. Custom `--base-branch` runs reject an accidental
+PR to `main`. Shared-branch children must descend from the epic tip, and a
+merge-back verdict counts only when the integration ref both descends from the
+requested base and contains the child SHA. The critic receives the resulting
+artifact path and exact branch truth instead of inferring identity from agent
+prose. Existing epic PRs are likewise rejected when their base differs from the
+epic's requested target.
+
 **Knobs:**
 
 | Flag | Default | Effect |

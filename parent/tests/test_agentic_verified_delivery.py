@@ -28,6 +28,19 @@ def _patch_flow(monkeypatch: pytest.MonkeyPatch, *, worker_error: bool = False) 
     monkeypatch.setattr(ag, "close_issue", lambda *args, **kwargs: None)
     monkeypatch.setattr(ag, "_dispatch_pr_sheriff", lambda *args, **kwargs: None)
     monkeypatch.setattr(ag, "_tag_flow_run_with_issue_id", lambda *args: None)
+    monkeypatch.setattr(
+        ag.delivery_truth,
+        "branch_truth",
+        lambda repo, *, branch, base_branch: {
+            "base_branch": base_branch,
+            "base_sha": "base-sha",
+            "head_branch": branch,
+            "head_sha": "head-sha",
+        },
+    )
+    monkeypatch.setattr(
+        ag.delivery_truth, "pull_request_truth", lambda *args, **kwargs: None
+    )
 
 
 def test_flow_records_provenance_and_terminal_success(

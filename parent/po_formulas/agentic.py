@@ -56,6 +56,7 @@ from prefect_orchestration.agent_step import agent_step
 from prefect_orchestration.beads_meta import claim_issue, close_issue
 
 from po_formulas import shared_branch
+from po_formulas import delivery_truth
 from po_formulas import verified_delivery
 from po_formulas.software_dev import (
     _load_rig_env,
@@ -478,6 +479,64 @@ def software_dev_agentic(
                 "agentic: worker iter %s closed_by=%s", iter_n, worker.closed_by
             )
 
+            # Transport gate: prompts tell the worker where to branch and where
+            # to aim its PR; this proves what actually happened before semantic
+            # judgment sees the change. A wrong base/head/preview never reaches
+            # the critic as if it were valid delivery evidence.
+            branch_evidence: dict[str, Any] = {}
+            pr_evidence: dict[str, Any] | None = None
+            preview_evidence: dict[str, Any] | None = None
+            worker_branch = shared_branch.child_branch_name(issue_id)
+            if not dry_run:
+                branch_base = epic_branch if shared_mode else base_branch
+                if shared_mode:
+                    delivery_truth.require_ancestor(
+                        pack_path_p,
+                        base_branch,
+                        epic_branch,
+                        label="epic branch base mismatch",
+                    )
+                branch_evidence = delivery_truth.branch_truth(
+                    pack_path_p,
+                    branch=worker_branch,
+                    base_branch=branch_base,
+                )
+                pr_evidence = delivery_truth.pull_request_truth(
+                    pack_path_p,
+                    head_branch=worker_branch,
+                    target_branch=base_branch,
+                )
+                if shared_mode and pr_evidence is not None:
+                    raise delivery_truth.DeliveryTruthError(
+                        f"shared child {worker_branch} opened a forbidden per-child PR"
+                    )
+                preview_candidate = _read_text(run_dir / _PREVIEW_URL_FILE).strip()
+                if preview_candidate:
+                    if preview_mode != "local":
+                        raise delivery_truth.DeliveryTruthError(
+                            "preview identity proof currently requires PO_PREVIEW=local"
+                        )
+                    worker_repo = delivery_truth.worktree_for_branch(
+                        pack_path_p, worker_branch
+                    )
+                    preview_evidence = delivery_truth.localhost_preview_truth(
+                        preview_candidate.splitlines()[-1].strip(),
+                        expected_repo=worker_repo,
+                        expected_revision=branch_evidence["head_sha"],
+                    )
+                patch: dict[str, Any] = {
+                    "revisions": {
+                        "base": branch_evidence["base_sha"],
+                        "head": branch_evidence["head_sha"],
+                    },
+                    "branch_truth": branch_evidence,
+                }
+                if pr_evidence is not None:
+                    patch["pull_request"] = pr_evidence
+                if preview_evidence is not None:
+                    patch["preview"] = preview_evidence
+                verified_delivery.update(run_dir, patch)
+
             review = agent_step(
                 agent_dir=_AGENTS_DIR / "agentic-reviewer",
                 task=_AGENTS_DIR / "agentic-reviewer" / "task.md",
@@ -486,7 +545,16 @@ def software_dev_agentic(
                 run_dir=run_dir,
                 step="review",
                 iter_n=iter_n,
-                ctx={"iter": iter_n, "pack_path": str(pack_path_p)},
+                ctx={
+                    "iter": iter_n,
+                    "pack_path": str(pack_path_p),
+                    "base_branch": base_branch,
+                    "epic_branch": epic_branch or "",
+                    "verified_delivery_path": str(
+                        verified_delivery.artifact_path(run_dir)
+                    ),
+                    "branch_truth": json.dumps(branch_evidence, sort_keys=True),
+                },
                 verdict_keywords=("pass", "fail"),
                 dry_run=dry_run,
             )
@@ -525,9 +593,9 @@ def software_dev_agentic(
         if shared_mode:
             if not dry_run:
                 epic_for_wt = parent_epic_id or parent_bead or issue_id
-                wt = shared_branch.ensure_integration_worktree(rig_path_p, epic_for_wt)
+                wt = shared_branch.ensure_integration_worktree(pack_path_p, epic_for_wt)
                 child_branch = shared_branch.child_branch_name(issue_id)
-                with shared_branch.integration_lock(rig_path_p, epic_for_wt):
+                with shared_branch.integration_lock(pack_path_p, epic_for_wt):
                     mb = agent_step(
                         agent_dir=_AGENTS_DIR / "agentic-merge-back",
                         task=_AGENTS_DIR / "agentic-merge-back" / "task.md",
@@ -550,13 +618,19 @@ def software_dev_agentic(
                     "reason": "" if merged else "merge-back agent could not integrate",
                 }
                 if merged:
+                    proven = delivery_truth.integration_truth(
+                        wt,
+                        child_branch=child_branch,
+                        integration_branch=epic_branch,
+                        base_branch=base_branch,
+                    )
+                    integration.update(proven)
                     logger.info(
                         "agentic: %s merged itself into %s", issue_id, epic_branch
                     )
                 else:
-                    logger.warning(
-                        "agentic: %s merge-back failed — acceptance critic will flag the gap",
-                        issue_id,
+                    raise delivery_truth.DeliveryTruthError(
+                        f"merge-back did not integrate {child_branch} into {epic_branch}"
                     )
         else:
             # End-of-run preview: read the worker's preview_url.txt and stamp
@@ -582,22 +656,17 @@ def software_dev_agentic(
 
         # The flow runs from the pack's main checkout while the worker commits
         # in its isolated branch. HEAD here would report the unchanged rig.
-        worker_branch = shared_branch.child_branch_name(issue_id)
         head_revision = _git_revision(pack_path_p, worker_branch)
         delivery_patch: dict[str, Any] = {
             "revisions": {"head": head_revision},
             "terminal": {"state": "completed", "reason": None},
         }
         if integration and integration.get("merged"):
-            integration_repo = shared_branch.ensure_integration_worktree(
-                rig_path_p, parent_epic_id or parent_bead or issue_id
+            delivery_patch["revisions"]["integration"] = integration.get(
+                "integration_sha"
             )
-            delivery_patch["revisions"]["integration"] = _git_revision(integration_repo)
-        if preview_url:
-            delivery_patch["preview"] = {
-                "url": preview_url,
-                "revision": head_revision,
-            }
+        if preview_url and preview_evidence:
+            delivery_patch["preview"] = preview_evidence
         contract = verified_delivery.update(run_dir, delivery_patch)
 
         # Per-child-PR mode only: the worker's PR is open and the critic passed,

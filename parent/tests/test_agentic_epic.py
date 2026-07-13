@@ -433,11 +433,13 @@ def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypa
         ]
     }
     _patch_common(monkeypatch, run_dir, plan)
+    pack_path = tmp_path / "code-pack"
+    pack_path.mkdir()
 
     calls: dict = {}
 
     def fake_create(rp, eid, **k):
-        calls["create"] = (str(eid), k)
+        calls["create"] = (str(rp), str(eid), k)
         return {
             "branch": f"epic/{eid}",
             "created": True,
@@ -446,7 +448,7 @@ def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypa
         }
 
     def fake_pr(rp, **k):
-        calls["pr"] = k
+        calls["pr"] = (str(rp), k)
         return {"opened": True, "url": "https://x/pull/9", "reason": ""}
 
     def boom_ready(rp, **k):
@@ -458,12 +460,14 @@ def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypa
     monkeypatch.setattr(
         ae.sb,
         "commits_ahead",
-        lambda rp, base, branch: calls.__setitem__("ahead", (base, branch)) or 2,
+        lambda rp, base, branch: (
+            calls.__setitem__("ahead", (str(rp), base, branch)) or 2
+        ),
     )
     monkeypatch.setattr(
         ae.sb,
         "cleanup_integration_worktree",
-        lambda rp, eid: calls.__setitem__("cleanup", str(eid)),
+        lambda rp, eid: calls.__setitem__("cleanup", (str(rp), str(eid))),
     )
     dispatched: dict = {}
     monkeypatch.setattr(
@@ -471,13 +475,18 @@ def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypa
     )
 
     result = ae.agentic_epic.fn(
-        epic_id=epic_id, rig="rig", rig_path=str(tmp_path), shared_branch=True
+        epic_id=epic_id,
+        rig="rig",
+        rig_path=str(tmp_path),
+        pack_path=str(pack_path),
+        shared_branch=True,
     )
 
     # One integration branch off main; NO PR opened upfront (calls["pr"] only set
     # at finalize). Children fanned out with epic_branch / parent_epic_id threaded.
-    assert calls["create"][0] == epic_id
-    assert calls["create"][1]["base_branch"] == "main"
+    assert calls["create"][0] == str(pack_path)
+    assert calls["create"][1] == epic_id
+    assert calls["create"][2]["base_branch"] == "main"
     assert dispatched["extra_formula_kwargs"] == {
         "base_branch": "main",
         "epic_branch": f"epic/{epic_id}",
@@ -486,10 +495,11 @@ def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypa
     assert dispatched["formula"] == "software-dev-agentic"
     # Finalize: checks commits ahead, then opens ONE ready PR (draft=False) and
     # cleans the integration worktree.
-    assert calls["ahead"] == ("main", f"epic/{epic_id}")
-    assert calls["pr"]["branch"] == f"epic/{epic_id}"
-    assert calls["pr"]["draft"] is False
-    assert calls["cleanup"] == epic_id
+    assert calls["ahead"] == (str(pack_path), "main", f"epic/{epic_id}")
+    assert calls["pr"][0] == str(pack_path)
+    assert calls["pr"][1]["branch"] == f"epic/{epic_id}"
+    assert calls["pr"][1]["draft"] is False
+    assert calls["cleanup"] == (str(pack_path), epic_id)
     assert result["shared_branch"] is True
     assert result["epic_branch"] == f"epic/{epic_id}"
     assert result["pr"]["url"] == "https://x/pull/9"

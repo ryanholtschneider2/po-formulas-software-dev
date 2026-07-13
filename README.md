@@ -62,10 +62,16 @@ gates test layers):
 | `PO_PREVIEW` | `local` \| `cloud` \| `off` | `off` (default): no preview work. `local`: the worker leaves its dev server running after the PR and reports `http://localhost:<port>`. `cloud`: the worker resolves a public URL via the rclaude shim (`rpreview <port>`). |
 | `PO_DEMO_VIDEO` | `0` \| `1` | `1` asks the worker to record a short demo video for visual changes. Default `0`. |
 
-Mechanism: the worker writes its URL to `<run_dir>/preview_url.txt`; on a critic
-pass the flow reads that file and stamps `po.preview_url` on the seed bead
+Mechanism: the worker writes its URL to `<run_dir>/preview_url.txt`. Before the
+critic runs, local preview mode resolves the listening process, proves its cwd
+belongs to the worker's registered worktree, and proves that checkout's `HEAD`
+equals the mechanically verified worker SHA. The proven served SHA and app root
+are written to `verified-delivery.json`; stale or wrong-app previews fail closed.
+On a critic pass the URL is also stamped as `po.preview_url` on the seed bead
 (parallel to how core stamps `po.run_dir`). A backend-only change leaves no file
-and stamps nothing. Example `.po-env`:
+and stamps nothing. Public/cloud previews currently cannot provide this local
+process proof and therefore must not claim a preview URL; use local strict proof
+until a remote revision-attestation protocol is configured. Example `.po-env`:
 
 ```
 PO_PREVIEW=local

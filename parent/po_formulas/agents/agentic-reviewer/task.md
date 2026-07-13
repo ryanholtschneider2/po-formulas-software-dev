@@ -7,7 +7,13 @@ bd show {{seed_id}}                                  # the original intent
 cat {{run_dir}}/plan.md 2>/dev/null || true          # the plan (if any)
 cat {{run_dir}}/build-iter-{{iter}}.diff 2>/dev/null || true   # what the actor did
 cat {{run_dir}}/gate-tests.txt 2>/dev/null || true   # the repo's own test/CI output
+cat {{verified_delivery_path}}                       # mechanically verified branch/PR/preview truth
 ```
+
+Expected target branch: `{{base_branch}}`. Shared epic branch (empty outside
+shared mode): `{{epic_branch}}`. Resolved worker branch truth: `{{branch_truth}}`.
+Treat the delivery artifact as canonical for exact revisions and targets; do not
+infer these facts from the worker's prose.
 
 If the diff artifact is missing, read the committed change directly — inspect the actor's worktree branch `agentic-{{seed_id}}` (`git -C {{pack_path}} log --oneline main..agentic-{{seed_id}}`, `git -C {{pack_path}} diff main...agentic-{{seed_id}}`).
 

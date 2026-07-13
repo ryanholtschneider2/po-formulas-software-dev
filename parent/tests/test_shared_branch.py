@@ -224,7 +224,11 @@ def test_open_draft_pr_idempotent_when_pr_exists(monkeypatch, tmp_path, gh_prese
     fake = FakeRun(
         {
             "remote": (0, "origin\n", ""),
-            "pr view": (0, "https://github.com/x/y/pull/3\n", ""),  # already open
+            "pr view": (
+                0,
+                '{"url":"https://github.com/x/y/pull/3","headRefName":"epic/e1","baseRefName":"main"}\n',
+                "",
+            ),  # already open
         }
     )
     monkeypatch.setattr(subprocess, "run", fake)
@@ -234,6 +238,30 @@ def test_open_draft_pr_idempotent_when_pr_exists(monkeypatch, tmp_path, gh_prese
     assert info["opened"] is False
     assert info["url"] == "https://github.com/x/y/pull/3"
     assert not fake.ran("pr", "create")
+
+
+def test_open_draft_pr_rejects_existing_pr_to_wrong_base(
+    monkeypatch, tmp_path, gh_present
+):
+    fake = FakeRun(
+        {
+            "remote": (0, "origin\n", ""),
+            "pr view": (
+                0,
+                '{"url":"https://github.com/x/y/pull/4","headRefName":"epic/e1","baseRefName":"main"}\n',
+                "",
+            ),
+        }
+    )
+    monkeypatch.setattr(subprocess, "run", fake)
+    with pytest.raises(RuntimeError, match="expected release, found main"):
+        sb.open_draft_pr(
+            tmp_path,
+            branch="epic/e1",
+            base_branch="release",
+            title="t",
+            body="b",
+        )
 
 
 def test_open_draft_pr_no_remote_is_graceful(monkeypatch, tmp_path, gh_present):

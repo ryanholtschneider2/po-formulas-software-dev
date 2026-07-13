@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import logging
 import os
 import subprocess
@@ -138,6 +139,14 @@ def create_integration_branch(
     remote = _has_remote(repo)
 
     if _local_branch_exists(repo, branch):
+        from po_formulas.delivery_truth import require_ancestor
+
+        require_ancestor(
+            repo,
+            base_branch,
+            branch,
+            label="reused epic branch base mismatch",
+        )
         logger.info("shared-branch: reusing existing %s", branch)
         pushed = False
         if remote:
@@ -226,7 +235,7 @@ def open_draft_pr(
     if not _gh_available():
         return {"opened": False, "url": "", "reason": "gh CLI not on PATH"}
 
-    existing = _existing_pr_url(repo, branch)
+    existing = _existing_pr_url(repo, branch, base_branch=base_branch)
     if existing:
         logger.info("shared-branch: PR already exists for %s: %s", branch, existing)
         return {"opened": False, "url": existing, "reason": "PR already exists"}
@@ -274,16 +283,31 @@ def open_draft_pr(
     return {"opened": True, "url": url, "reason": ""}
 
 
-def _existing_pr_url(repo: Path, branch: str) -> str:
+def _existing_pr_url(repo: Path, branch: str, *, base_branch: str | None = None) -> str:
     """Return the URL of an open PR whose head is ``branch``, or ``""``."""
     proc = subprocess.run(
-        ["gh", "pr", "view", branch, "--json", "url", "-q", ".url"],
+        ["gh", "pr", "view", branch, "--json", "url,headRefName,baseRefName"],
         cwd=str(repo),
         capture_output=True,
         text=True,
     )
     if proc.returncode == 0 and proc.stdout.strip():
-        return proc.stdout.strip()
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("gh returned invalid existing PR identity JSON") from exc
+        actual_head = str(payload.get("headRefName") or "")
+        actual_base = str(payload.get("baseRefName") or "")
+        if actual_head and actual_head != branch:
+            raise RuntimeError(
+                f"existing PR head mismatch: expected {branch}, found {actual_head}"
+            )
+        if base_branch is not None and actual_base != base_branch:
+            raise RuntimeError(
+                f"existing PR target mismatch: expected {base_branch}, found "
+                f"{actual_base or '(empty)'}"
+            )
+        return str(payload.get("url") or "")
     return ""
 
 

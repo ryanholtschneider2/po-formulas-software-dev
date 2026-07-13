@@ -30,6 +30,7 @@ def test_explicit_pack_path_wins_over_metadata(
         return type("P", (), {"returncode": 0, "stdout": out, "stderr": ""})()
 
     monkeypatch.setattr(sd_mod.shutil, "which", lambda _: "/usr/bin/bd")
+    monkeypatch.setattr(sd_mod, "_metadata_binary", lambda _: "/usr/bin/bd")
     monkeypatch.setattr(sd_mod.subprocess, "run", fake_run)
 
     got = _resolve_pack_path(str(explicit), "x-1", rig)
@@ -49,6 +50,7 @@ def test_bd_metadata_overrides_rig_path_default(
         return type("P", (), {"returncode": 0, "stdout": out, "stderr": ""})()
 
     monkeypatch.setattr(sd_mod.shutil, "which", lambda _: "/usr/bin/bd")
+    monkeypatch.setattr(sd_mod, "_metadata_binary", lambda _: "/usr/bin/bd")
     monkeypatch.setattr(sd_mod.subprocess, "run", fake_run)
 
     got = _resolve_pack_path(None, "x-1", rig)
@@ -66,6 +68,7 @@ def test_falls_back_to_rig_path_when_neither_set(
         return type("P", (), {"returncode": 0, "stdout": out, "stderr": ""})()
 
     monkeypatch.setattr(sd_mod.shutil, "which", lambda _: "/usr/bin/bd")
+    monkeypatch.setattr(sd_mod, "_metadata_binary", lambda _: "/usr/bin/bd")
     monkeypatch.setattr(sd_mod.subprocess, "run", fake_run)
 
     got = _resolve_pack_path(None, "x-1", rig)
