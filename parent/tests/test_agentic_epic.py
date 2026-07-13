@@ -429,6 +429,14 @@ def _patch_common(monkeypatch, run_dir, plan):
             "blocking_facts": [],
         },
     )
+    monkeypatch.setattr(
+        ae.delivery_truth, "worktree_for_branch", lambda repo, branch: Path(repo)
+    )
+    monkeypatch.setattr(
+        ae.delivery_truth,
+        "revision",
+        lambda repo, ref: "assembled-sha" if ref == "HEAD" else f"{ref}-sha",
+    )
 
 
 def test_agentic_epic_shared_branch_creates_one_branch_and_pr(tmp_path, monkeypatch):
@@ -852,12 +860,45 @@ def test_acceptance_fixtures_cover_required_failure_shapes():
         Path(__file__).parents[1] / "evals" / "agentic-epic-acceptance-cases.json"
     )
     cases = json.loads(fixture_path.read_text())
-    assert {case["id"] for case in cases} == {
+    required = {case["id"] for case in cases if case["expected"] == "fail"}
+    assert required == {
         "foundation-only",
         "missing-ui",
         "unintegrated-child",
     }
-    assert all(case["expected"] == "fail" for case in cases)
+
+
+def test_acceptance_refuses_wrong_checkout_before_agent_runs(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(
+        ae,
+        "_build_acceptance_manifest",
+        lambda **kwargs: {"assembled_sha": "assembled-sha", "blocking_facts": []},
+    )
+    monkeypatch.setattr(
+        ae.delivery_truth, "worktree_for_branch", lambda repo, branch: tmp_path
+    )
+    monkeypatch.setattr(ae.delivery_truth, "revision", lambda repo, ref: "wrong-sha")
+    monkeypatch.setattr(
+        ae,
+        "agent_step",
+        lambda **kwargs: pytest.fail("acceptance agent ran against the wrong checkout"),
+    )
+
+    with pytest.raises(ae.delivery_truth.DeliveryTruthError, match="checkout mismatch"):
+        ae._run_epic_acceptance_critic(
+            epic_id="e1",
+            rig_path=tmp_path,
+            run_dir=run_dir,
+            pack_path=tmp_path,
+            epic_branch="epic/e1",
+            base_branch="main",
+            child_ids=["c1"],
+            dispatch={"results": {}},
+            iter_n=1,
+            dry_run=False,
+        )
 
 
 def test_agentic_epic_default_is_shared_branch(tmp_path, monkeypatch):

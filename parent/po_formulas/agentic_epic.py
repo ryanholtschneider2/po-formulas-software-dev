@@ -608,10 +608,14 @@ def _run_epic_acceptance_critic(
         base_branch=base_branch,
         epic_branch=epic_branch,
     )
-    try:
-        integration_path = delivery_truth.worktree_for_branch(pack_path, epic_branch)
-    except delivery_truth.DeliveryTruthError:
-        integration_path = pack_path
+    integration_path = delivery_truth.worktree_for_branch(pack_path, epic_branch)
+    checkout_sha = delivery_truth.revision(integration_path, "HEAD")
+    if checkout_sha != manifest["assembled_sha"]:
+        raise delivery_truth.DeliveryTruthError(
+            "epic acceptance checkout mismatch: "
+            f"expected {manifest['assembled_sha']}, found {checkout_sha} "
+            f"in {integration_path}"
+        )
     accept = agent_step(
         agent_dir=_AGENTS_DIR / "agentic-epic-acceptance-critic",
         task=_AGENTS_DIR / "agentic-epic-acceptance-critic" / "task.md",

@@ -1,5 +1,15 @@
 [
   {
+    "id": "complete",
+    "prd": ["The assembled command prints the customer-visible result"],
+    "child_evidence": {
+      "changed_surfaces": ["CLI"],
+      "live_verification": ["Run ./smoke.sh and observe CUSTOMER FLOW PASS"]
+    },
+    "assembled_observation": "smoke.sh exists on the assembled branch and prints CUSTOMER FLOW PASS.",
+    "expected": "pass"
+  },
+  {
     "id": "foundation-only",
     "prd": ["A customer can complete the onboarding flow in the live product"],
     "child_evidence": {
