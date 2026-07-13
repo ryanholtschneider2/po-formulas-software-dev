@@ -104,10 +104,22 @@ validates the enum and applies operator proof policy:
 | `api`, `data`, `infrastructure`, `service`, or `ui` | Deploy smoke + review package + live verifier |
 | `ui` with `PO_DEMO_VIDEO=1` | The above plus demo-video |
 
+Set `PO_AGENTIC_PROOF_MODE=strict` in a rig's `.po-env` to require review
+packaging and live verification for every task, including low-risk code/docs.
+The default is `adaptive`, so existing rigs retain the sizing-selected fast
+path. Strict mode does not reclassify surfaces or override `PO_DEMO_VIDEO`;
+deploy smoke remains limited to deployable surfaces. See
+[`docs/soloco-strict-product-mode.md`](docs/soloco-strict-product-mode.md) for
+the SoloCo integration contract.
+
 UI therefore cannot pass from a diff alone. Proof-role results, discovered
 screenshots, and the demo path are appended to `verified-delivery.json`. A
 verifier rejection is fed to the next actor iteration and all required proof
 phases run again, preventing stale evidence from substituting for a retest.
+Selected phases also fail closed when their current-iteration output is missing,
+empty, or explicitly red: deploy smoke requires `smoke-test-output.txt`, review
+packaging requires `review-artifacts/summary.md` (plus `overview.md` for
+workflow/infrastructure), and approval requires the matching verifier report.
 When demo capture is enabled for UI, the flow clears any prior demo before the
 role runs and requires a new, non-empty `review-artifacts/demo.mp4`; a skip,
 missing file, or role error returns to the actor and cannot reach approval.
@@ -118,6 +130,13 @@ retry (without touching the shared PO installation):
 ```bash
 cd parent
 uv run python evals/run_agentic_proof_smoke.py /tmp/agentic-proof-smoke
+```
+
+Run the broader delivery dogfood corpus from the repository root:
+
+```bash
+uv run --project parent python \
+  parent/evals/run_verified_delivery_dogfood.py /tmp/verified-delivery-dogfood
 ```
 
 ### Verified-delivery artifact

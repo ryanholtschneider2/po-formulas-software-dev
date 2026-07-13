@@ -72,6 +72,15 @@ def _patch_flow(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     def fake_step(**kwargs: object) -> AgentStepResult:
         step = str(kwargs["step"])
         calls.append(step)
+        run_dir = Path(str(kwargs["run_dir"]))
+        if step == "review-artifacts":
+            review_dir = run_dir / "review-artifacts"
+            review_dir.mkdir(parents=True, exist_ok=True)
+            (review_dir / "summary.md").write_text("# Review\n")
+        if step == "verify":
+            (run_dir / f"verification-report-iter-{kwargs['iter_n']}.md").write_text(
+                "# Verification\n\nPASS\n"
+            )
         verdict = {"review": "pass", "verify": "approved"}.get(step, "complete")
         return AgentStepResult(bead_id=f"iter-{step}", verdict=verdict)
 
@@ -110,6 +119,15 @@ def test_sizing_precedes_worker_and_budget_is_recorded(
 
     assert calls == ["sizing", "agentic", "review", "review-artifacts", "verify"]
     assert result["verified_delivery"]["sizing"]["iteration_budget"] == 3
+
+
+def test_strict_proof_mode_extends_adaptive_plan_without_reclassification() -> None:
+    adaptive = sizing.DeliveryPlan(False, False, False, False)
+    strict = sizing.apply_proof_mode(adaptive, "strict")
+    assert strict == sizing.DeliveryPlan(True, True, False, False)
+    assert sizing.apply_proof_mode(adaptive, "adaptive") is adaptive
+    with pytest.raises(ValueError, match="proof mode"):
+        sizing.apply_proof_mode(adaptive, "mandatory")
 
 
 def test_decomposition_refusal_never_dispatches_worker(
