@@ -43,11 +43,15 @@ under the chosen output directory.
 ## Verified-delivery dogfood
 
 `run_verified_delivery_dogfood.py` is the publish gate for the complete
-verified-delivery contract. It runs the decorated UI flow through a forced
-verifier rejection and retry, exercises strict backend proof selection, proves
-a shared child in a disposable git epic, starts a real localhost server for
-stale-preview rejection, and injects red smoke, wrong PR base, missing artifact,
-and stopped/resumed state.
+verified-delivery contract. It executes scratch backend and UI tasks through
+`software_dev_agentic`, including a forced verifier rejection and retry. It
+also drives a shared child through the formula's real branch-truth and
+merge-back path in a disposable git epic, then feeds the emitted child contract
+to assembled acceptance. Formula-boundary injections prove that explicit red
+smoke and success-shaped packaging with no artifact fail closed. A separate run
+is stopped during verification and resumed with `PO_RESUME=1`, proving preserved
+role/session state and a final terminal contract. The remaining scenarios start
+a real localhost server for stale-preview rejection and inject a wrong PR base.
 
 ```bash
 uv run --project parent python \

@@ -61,4 +61,9 @@ uv run --project parent python \
   parent/evals/run_verified_delivery_dogfood.py /tmp/verified-delivery-dogfood
 ```
 
-The retained report covers strict backend proof, the full UI rejection/retry chain, shared-epic integration, red smoke, stale preview, wrong PR base, missing artifacts, verifier rejection, and stopped/resumed state.
+The retained report covers a formula-executed strict backend task, the full UI
+rejection/retry chain, and a formula-executed shared child whose emitted
+delivery contract is consumed by assembled epic acceptance. It also proves
+formula-boundary rejection of red smoke and missing packaging, a real localhost
+stale preview, wrong PR base, verifier rejection, and an injected stop followed
+by `PO_RESUME=1` through terminal completion.
