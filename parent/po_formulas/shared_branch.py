@@ -373,6 +373,82 @@ def ensure_integration_worktree(rig_path: Path | str, epic_id: str) -> Path:
     return wt
 
 
+def preflight_child_ancestry(
+    rig_path: Path | str, *, epic_branch: str, child_id: str
+) -> dict[str, object]:
+    """Fail before agent execution when a reused child branch is behind the epic.
+
+    A recovered shared-branch run may find the deterministic child branch and
+    worktree left by an older attempt.  Reusing it after another child advanced
+    the epic silently omits prerequisite commits.  This check is read-only: it
+    reports exact refs, SHAs, and cleanup commands, but never discards a possibly
+    valuable dirty worktree on the operator's behalf.
+    """
+    repo = Path(rig_path).expanduser().resolve()
+    child_branch = child_branch_name(child_id)
+    epic_sha = _git(["rev-parse", "--verify", epic_branch], cwd=repo).stdout.strip()
+    child_ref = f"refs/heads/{child_branch}"
+    child_probe = _git(
+        ["rev-parse", "--verify", "--quiet", child_ref], cwd=repo, check=False
+    )
+    if child_probe.returncode != 0:
+        return {
+            "status": "fresh",
+            "epic_branch": epic_branch,
+            "epic_sha": epic_sha,
+            "child_branch": child_branch,
+            "child_sha": "",
+            "worktree": "",
+        }
+
+    child_sha = child_probe.stdout.strip()
+    ancestry = _git(
+        ["merge-base", "--is-ancestor", epic_sha, child_sha],
+        cwd=repo,
+        check=False,
+    )
+    worktree = ""
+    current_path = ""
+    listing = _git(["worktree", "list", "--porcelain"], cwd=repo, check=False)
+    for line in listing.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line.removeprefix("worktree ")
+        elif line == f"branch {child_ref}":
+            worktree = current_path
+            break
+
+    if ancestry.returncode != 0:
+        location = worktree or "(no registered worktree)"
+        removal = (
+            f"git worktree remove --force {shlex_quote(worktree)}\n" if worktree else ""
+        )
+        raise RuntimeError(
+            "shared-branch preflight: stale child ancestry before agent execution\n"
+            f"epic: {epic_branch} @ {epic_sha}\n"
+            f"child: {child_branch} @ {child_sha}\n"
+            f"worktree: {location}\n"
+            "The current epic tip is not an ancestor of the reused child branch. "
+            "Inspect/commit any valuable work first; when safe, clean the stale "
+            "checkout and redispatch:\n"
+            f"{removal}git branch -D {shlex_quote(child_branch)}"
+        )
+    return {
+        "status": "reusable",
+        "epic_branch": epic_branch,
+        "epic_sha": epic_sha,
+        "child_branch": child_branch,
+        "child_sha": child_sha,
+        "worktree": worktree,
+    }
+
+
+def shlex_quote(value: str) -> str:
+    """Shell-quote diagnostics without making subprocess transport shell-based."""
+    import shlex
+
+    return shlex.quote(value)
+
+
 def cleanup_integration_worktree(rig_path: Path | str, epic_id: str) -> None:
     """Remove the integration worktree (finalize). Best-effort; never raises."""
     repo = Path(rig_path).expanduser().resolve()
@@ -466,4 +542,5 @@ __all__ = [
     "open_draft_pr",
     "mark_pr_ready",
     "branch_directive",
+    "preflight_child_ancestry",
 ]
