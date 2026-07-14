@@ -11,6 +11,7 @@ serialization) without touching a real repo. A separate real-git round-trip
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -307,3 +308,58 @@ def test_branch_directive_overrides_and_names_branch():
     # …and diff against the epic branch (not main) so the critic sees only this
     # child's changes, not prior children's integrated work.
     assert "epic/rig-e1...HEAD" in text
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+    )
+
+
+def _init_repo(repo: Path) -> None:
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "user.email", "test@example.com")
+    (repo / "base.txt").write_text("base\n")
+    _git(repo, "add", "base.txt")
+    _git(repo, "commit", "-m", "base")
+
+
+def test_preflight_accepts_child_cut_from_current_epic_tip(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "branch", "epic/e1")
+    _git(repo, "branch", sb.child_branch_name("e1.1"), "epic/e1")
+
+    result = sb.preflight_child_ancestry(repo, epic_branch="epic/e1", child_id="e1.1")
+
+    assert result["status"] == "reusable"
+    assert result["epic_sha"] == result["child_sha"]
+
+
+def test_preflight_rejects_stale_registered_worktree_with_actionable_shas(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    child_wt = tmp_path / "child-wt"
+    _init_repo(repo)
+    child_branch = sb.child_branch_name("e1.1")
+    _git(repo, "branch", "epic/e1")
+    _git(repo, "branch", child_branch)
+    _git(repo, "worktree", "add", str(child_wt), child_branch)
+    _git(repo, "checkout", "epic/e1")
+    (repo / "prerequisite.txt").write_text("integrated prerequisite\n")
+    _git(repo, "add", "prerequisite.txt")
+    _git(repo, "commit", "-m", "advance epic")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        sb.preflight_child_ancestry(repo, epic_branch="epic/e1", child_id="e1.1")
+
+    message = str(excinfo.value)
+    assert "before agent execution" in message
+    assert str(child_wt) in message
+    assert "git worktree remove --force" in message
+    assert f"git branch -D {child_branch}" in message
+    assert _git(repo, "rev-parse", "epic/e1").stdout.strip() in message
+    assert _git(repo, "rev-parse", child_branch).stdout.strip() in message

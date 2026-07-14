@@ -600,6 +600,19 @@ def software_dev_agentic(
     # without opening a PR; the flow integrates on pass. Empty directive in the
     # default per-child-PR mode keeps the worker prompt byte-for-byte unchanged.
     shared_mode = bool(epic_branch)
+    if shared_mode and not dry_run:
+        ancestry_preflight = shared_branch.preflight_child_ancestry(
+            pack_path_p,
+            epic_branch=epic_branch,
+            child_id=issue_id,
+        )
+        (run_dir / "shared-branch-preflight.json").write_text(
+            json.dumps(ancestry_preflight, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        verified_delivery.update(
+            run_dir, {"shared_branch_preflight": ancestry_preflight}
+        )
     worker_branch_directive = (
         shared_branch.branch_directive(epic_branch, issue_id) if shared_mode else ""
     )
