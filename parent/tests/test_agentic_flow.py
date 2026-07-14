@@ -88,6 +88,18 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, closed: list[str]) -> None:
     monkeypatch.setattr(ag.delivery_truth, "require_ancestor", lambda *a, **kw: None)
     monkeypatch.setattr(ag.delivery_truth, "pull_request_truth", lambda *a, **kw: None)
     monkeypatch.setattr(
+        ag.shared_branch,
+        "preflight_child_ancestry",
+        lambda *a, **kw: {
+            "status": "fresh",
+            "epic_branch": kw["epic_branch"],
+            "epic_sha": "epic-sha",
+            "child_branch": ag.shared_branch.child_branch_name(kw["child_id"]),
+            "child_sha": "",
+            "worktree": "",
+        },
+    )
+    monkeypatch.setattr(
         ag.delivery_truth,
         "integration_truth",
         lambda *a, **kw: {
