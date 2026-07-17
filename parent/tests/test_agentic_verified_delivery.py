@@ -48,6 +48,11 @@ def _patch_flow(monkeypatch: pytest.MonkeyPatch, *, worker_error: bool = False) 
     monkeypatch.setattr(
         ag.delivery_truth, "pull_request_truth", lambda *args, **kwargs: None
     )
+    monkeypatch.setattr(
+        ag.delivery_truth,
+        "worktree_for_branch",
+        lambda repo, branch: Path(repo).parent / f"{Path(repo).name}.{branch}",
+    )
 
 
 def test_flow_records_provenance_and_terminal_success(

@@ -1,5 +1,7 @@
 You are the **releaser** assembling the review artifacts package for issue `{{issue_id}}`.
 
+The delivered source is the mechanically resolved worker checkout at `{{pack_path}}`. Use it for file lists, examples, and any commands that inspect the implementation; `{{rig_path}}` remains the tracker/run-metadata root.
+
 Create `{{run_dir}}/review-artifacts/summary.md` as the canonical human handoff for the run. It should be the first file a reviewer opens, and it must align with `{{run_dir}}/artifact-manifest.json`.
 
 Also create `{{run_dir}}/review-artifacts/overview.md` when the work benefits from a faster "what changed and why is it correct?" read. For workflow / planning / orchestration / infrastructure features, treat `overview.md` as required and include a simple diagram (Mermaid is fine), a tiny example, or another high-level visual explanation.

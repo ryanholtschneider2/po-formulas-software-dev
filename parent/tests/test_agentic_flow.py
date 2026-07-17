@@ -88,6 +88,11 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, closed: list[str]) -> None:
     monkeypatch.setattr(ag.delivery_truth, "require_ancestor", lambda *a, **kw: None)
     monkeypatch.setattr(ag.delivery_truth, "pull_request_truth", lambda *a, **kw: None)
     monkeypatch.setattr(
+        ag.delivery_truth,
+        "worktree_for_branch",
+        lambda repo, branch: Path(repo).parent / f"{Path(repo).name}.{branch}",
+    )
+    monkeypatch.setattr(
         ag.shared_branch,
         "preflight_child_ancestry",
         lambda *a, **kw: {
@@ -537,6 +542,18 @@ def test_ui_delivery_runs_complete_live_proof_chain(
         "deploy_smoke": True,
         "demo": True,
     }
+    expected_checkout = tmp_path / "rig.agentic-seed-ui"
+    proof_steps = {
+        "review",
+        "deploy-smoke",
+        "demo-video",
+        "review-artifacts",
+        "verify",
+    }
+    for call in calls:
+        if call["step"] in proof_steps:
+            assert call["ctx"]["pack_path"] == str(expected_checkout)
+            assert call["rig_path"] == str(rig)
     assert closed == ["seed-ui"]
 
 

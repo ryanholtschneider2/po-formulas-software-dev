@@ -103,6 +103,11 @@ def _patch_flow(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     monkeypatch.setattr(
         ag.delivery_truth, "pull_request_truth", lambda *args, **kwargs: None
     )
+    monkeypatch.setattr(
+        ag.delivery_truth,
+        "worktree_for_branch",
+        lambda repo, branch: Path(repo).parent / f"{Path(repo).name}.{branch}",
+    )
 
 
 def test_sizing_precedes_worker_and_budget_is_recorded(
@@ -130,7 +135,7 @@ def test_strict_proof_mode_extends_adaptive_plan_without_reclassification() -> N
         sizing.apply_proof_mode(adaptive, "mandatory")
 
 
-def test_decomposition_refusal_never_dispatches_worker(
+def test_decomposition_delegates_to_agentic_epic_without_dispatching_worker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_dir = tmp_path / ".planning/software-dev-agentic/storybook-rebuild"
@@ -145,19 +150,73 @@ def test_decomposition_refusal_never_dispatches_worker(
     )
     calls: list[str] = []
     _patch_flow(monkeypatch, calls)
+    delegated: list[dict[str, object]] = []
 
-    with pytest.raises(sizing.DecompositionRequiredError, match="agentic-epic"):
+    def fake_delegate(**kwargs: object) -> dict[str, object]:
+        delegated.append(kwargs)
+        return {"status": "completed", "children": ["storybook-rebuild.1"]}
+
+    monkeypatch.setattr(ag, "_delegate_to_agentic_epic", fake_delegate)
+
+    result = ag.software_dev_agentic.fn(
+        issue_id="storybook-rebuild",
+        rig="rig",
+        rig_path=str(tmp_path),
+        pack_path=str(tmp_path),
+    )
+
+    assert calls == ["sizing"]
+    assert result["status"] == "decomposed"
+    assert result["epic_result"]["children"] == ["storybook-rebuild.1"]
+    assert delegated == [
+        {
+            "issue_id": "storybook-rebuild",
+            "rig": "rig",
+            "rig_path": tmp_path,
+            "pack_path": tmp_path,
+            "iteration_budget": 4,
+            "dry_run": False,
+            "base_branch": "main",
+        }
+    ]
+    contract = json.loads((run_dir / "verified-delivery.json").read_text())
+    assert contract["terminal"]["state"] == "delegated"
+    assert contract["delegation"]["status"] == "completed"
+    assert contract["sizing"]["decision"] == "decompose"
+
+
+def test_decomposition_propagates_epic_failure_and_records_failed_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / ".planning/software-dev-agentic/oversized"
+    _write(
+        run_dir,
+        decision="decompose",
+        size="oversized",
+        risk="high",
+        decomposition_reason="Needs two independently verified children.",
+    )
+    calls: list[str] = []
+    _patch_flow(monkeypatch, calls)
+
+    def fail_delegate(**_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("child graph failed")
+
+    monkeypatch.setattr(ag, "_delegate_to_agentic_epic", fail_delegate)
+
+    with pytest.raises(RuntimeError, match="child graph failed"):
         ag.software_dev_agentic.fn(
-            issue_id="storybook-rebuild",
+            issue_id="oversized",
             rig="rig",
             rig_path=str(tmp_path),
             pack_path=str(tmp_path),
         )
 
-    assert calls == ["sizing"]
     contract = json.loads((run_dir / "verified-delivery.json").read_text())
-    assert contract["terminal"]["state"] == "rejected"
-    assert contract["sizing"]["decision"] == "decompose"
+    assert contract["terminal"] == {
+        "state": "failed",
+        "reason": "child graph failed",
+    }
 
 
 def test_prompt_contains_no_deterministic_semantic_sizing() -> None:
