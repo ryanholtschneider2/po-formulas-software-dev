@@ -77,7 +77,7 @@ from prefect_orchestration.beads_meta import (
 
 from po_formulas import shared_branch as sb
 from po_formulas import delivery_truth, verified_delivery
-from po_formulas.agentic import _bd_set_metadata, _read_text
+from po_formulas.agentic import _bd_set_metadata, _dispatch_provenance, _read_text
 from po_formulas.graph import graph_run
 from po_formulas.software_dev import (
     _load_rig_env,
@@ -233,8 +233,59 @@ def _bd_dep_add(child_id: str, prereq_id: str, rig_path: Path) -> None:
     )
 
 
+def _stamp_child_runtime(
+    child_id: str,
+    *,
+    formula: str,
+    epic_id: str,
+    runtime: dict[str, Any],
+    rig_path: Path,
+) -> None:
+    """Persist the exact inherited dispatch tuple before graph dispatch.
+
+    Dolt-backed beads receive searchable metadata. Beads-rust has no arbitrary
+    metadata, so the same payload is appended as one audit comment; formula
+    routing remains portable through the existing ``formula:<name>`` label.
+    """
+    values = {
+        "po.formula": formula,
+        "po.dispatch_formula": "agentic-epic",
+        "po.backend": runtime.get("backend"),
+        "po.provider": runtime.get("provider"),
+        "po.account": runtime.get("account"),
+        "po.account_class": runtime.get("account_class"),
+        "po.model": runtime.get("model"),
+        "po.effort": runtime.get("effort"),
+        "po.rig": runtime.get("rig"),
+        "po.rig_path": runtime.get("rig_path"),
+        "po.parent_epic": epic_id,
+        "po.flow_run_id": runtime.get("flow_run_id"),
+        "po.dispatch_command": runtime.get("dispatch_command"),
+    }
+    durable = {key: str(value) for key, value in values.items() if value is not None}
+    for key, value in durable.items():
+        _bd_set_metadata(child_id, key, value, rig_path)
+    subprocess.run(
+        [
+            "bd",
+            "comments",
+            "add",
+            child_id,
+            "po-dispatch-runtime:" + json.dumps(durable, sort_keys=True),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=str(rig_path),
+    )
+
+
 def _create_children(
-    epic_id: str, plan: list[dict[str, Any]], rig_path: Path, logger: Any
+    epic_id: str,
+    plan: list[dict[str, Any]],
+    rig_path: Path,
+    runtime: dict[str, Any],
+    logger: Any,
 ) -> list[str]:
     """Create + stamp + wire one bead per planned child. Returns child ids.
 
@@ -264,7 +315,13 @@ def _create_children(
         # Stamp the per-child formula so graph_run routes each through the right
         # loop. `_bd_set_metadata` also adds a `formula:<name>` label, which is
         # the only per-bead stamp beads-rust honors (no arbitrary metadata).
-        _bd_set_metadata(actual_id, "po.formula", c["formula"], rig_path)
+        _stamp_child_runtime(
+            actual_id,
+            formula=c["formula"],
+            epic_id=epic_id,
+            runtime=runtime,
+            rig_path=rig_path,
+        )
         child_ids[c["key"]] = actual_id
         logger.info(
             "agentic-epic: created %s (%s) [%s]",
@@ -678,6 +735,7 @@ def _decompose_epic(
     max_children: int,
     shared_branch: bool,
     dry_run: bool,
+    runtime: dict[str, Any],
     logger: Any,
 ) -> list[str] | dict[str, Any]:
     """Phases 1-3: PRD -> plan (actor-critic) -> create stamped children.
@@ -757,7 +815,7 @@ def _decompose_epic(
         return _dry_run_summary(epic_id, run_dir, max_children, shared_branch, logger)
 
     plan = _parse_plan(run_dir, max_children)
-    child_ids = _create_children(epic_id, plan, rig_path_p, logger)
+    child_ids = _create_children(epic_id, plan, rig_path_p, runtime, logger)
     logger.info("agentic-epic: created %d child bead(s): %s", len(child_ids), child_ids)
     return child_ids
 
@@ -817,6 +875,11 @@ def agentic_epic(
     _load_rig_env(rig_path_p)
     _tag_flow_run_with_issue_id(epic_id, logger)
 
+    runtime = _dispatch_provenance(
+        run_dir, rig, rig_path_p, pack_path_p, parent_epic=epic_id
+    )
+    runtime["formula"] = "agentic-epic"
+
     goal = _bd_show_description(epic_id, rig_path_p)
     (run_dir / "goal.md").write_text(goal or f"(no description on {epic_id})")
 
@@ -851,6 +914,7 @@ def agentic_epic(
                 max_children,
                 shared_branch,
                 dry_run,
+                runtime,
                 logger,
             )
             if isinstance(decomposed, dict):

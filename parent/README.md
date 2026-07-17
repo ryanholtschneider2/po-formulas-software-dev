@@ -71,11 +71,13 @@ deploy smoke, demo, review-artifact assembly, and live verifier. A rejection
 from either reviewer writes a concrete fix list and the actor reruns the whole
 proof chain after addressing it.
 
-Oversized multi-surface goals are refused before the worker starts. The error
-points the operator to `po run agentic-epic`, whose planner can turn the goal
-into PR-sized children. This is model judgment rather than keyword, file-count,
-or scoring logic in Python; code only validates the JSON shape and enforces the
-declared budget boundary.
+Oversized multi-surface goals are delegated before the worker starts. The same
+flow invokes `agentic-epic` as a Prefect subflow, whose planner turns the goal
+into reviewed, dependency-ordered child beads and dispatches them. The original
+`po run` remains active until the delegated epic reaches a real terminal state;
+no manual relaunch is required. This is model judgment rather than keyword,
+file-count, or scoring logic in Python; code only validates the JSON shape,
+enforces the declared budget boundary, and transports the decision.
 
 Pipeline:
 
@@ -190,8 +192,11 @@ The sizing evidence is stored at
 `<rig>/.planning/software-dev-agentic/<issue>/sizing.json`, copied with dispatch
 provenance into `verified-delivery.json`, and summarized on portable bead labels
 (`po_size:*`, `po_risk:*`, `po_sizing_decision:*`, and
-`po_iteration_budget:*`). A `decompose` result leaves the seed open and records
-terminal state `rejected`; it does not consume worker iterations.
+`po_iteration_budget:*`). A `decompose` result records terminal state
+`delegated`, then automatically continues through `agentic-epic`. The epic
+planner creates reviewed PR-sized children, dispatches their dependency graph,
+and owns closing the original seed only after assembled acceptance. It does not
+consume iterations in the original single-worker loop.
 
 **Use when:** you want the agent to own the whole loop — including the
 worktree and the PR — judged only on whether it accomplished the goal,

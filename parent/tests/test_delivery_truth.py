@@ -43,6 +43,17 @@ def test_branch_truth_proves_custom_base_and_rejects_wrong_ancestry(repo: Path) 
         dt.branch_truth(repo, branch="unrelated", base_branch="release")
 
 
+def test_worktree_for_branch_resolves_feature_checkout_not_root(repo: Path) -> None:
+    """Regression: post-worker proof must not read the unchanged root checkout."""
+    _git(repo, "switch", "main")
+    feature_checkout = repo.parent / "feature-checkout"
+    _git(repo, "worktree", "add", str(feature_checkout), "agentic-seed")
+
+    assert not (repo / "child.txt").exists()
+    assert (feature_checkout / "child.txt").read_text() == "child\n"
+    assert dt.worktree_for_branch(repo, "agentic-seed") == feature_checkout.resolve()
+
+
 def test_integration_truth_rejects_child_falsely_marked_integrated(repo: Path) -> None:
     _git(repo, "branch", "epic/e1", "release")
     with pytest.raises(dt.DeliveryTruthError, match="child is not integrated"):

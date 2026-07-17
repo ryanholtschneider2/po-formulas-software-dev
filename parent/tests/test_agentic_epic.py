@@ -180,6 +180,11 @@ def test_agentic_epic_creates_stamped_children_and_dispatches(tmp_path, monkeypa
     # Each child stamped with the agentic formula.
     assert (f"{epic_id}.1", "po.formula", "software-dev-agentic") in stamped
     assert (f"{epic_id}.2", "po.formula", "software-dev-agentic") in stamped
+    assert (f"{epic_id}.1", "po.dispatch_formula", "agentic-epic") in stamped
+    assert (f"{epic_id}.1", "po.provider", "codex") in stamped
+    assert (f"{epic_id}.1", "po.rig", "rig") in stamped
+    assert (f"{epic_id}.1", "po.rig_path", str(rig_path)) in stamped
+    assert (f"{epic_id}.1", "po.parent_epic", epic_id) in stamped
     # The blocks edge: child .2 depends on .1.
     assert deps == [(f"{epic_id}.2", f"{epic_id}.1")]
     # Fanned out via graph_run, rooted at the epic, with the agentic formula.

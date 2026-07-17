@@ -4,7 +4,7 @@ This step prevents "tests pass but feature doesn't work."
 
 # Paths
 
-The bead, venv, and run_dir live under `{{rig_path}}`. Source code for this issue landed in `{{pack_path}}`. When an AC says "installed pack can import X", verify against the **installed distribution** (`cd {{rig_path}} && uv run python -c 'import <module>'`) — not the source tree under `{{pack_path}}`. Reading source to confirm a change is fine; importability is the consumer-side check that matters.
+The bead and run_dir live under `{{rig_path}}`. Source code for this issue landed in the mechanically resolved worker checkout at `{{pack_path}}`. Run source builds, dev servers, tests, and file inspection from `{{pack_path}}`, never from the seed/root checkout. When an AC specifically says "installed pack can import X", verify against the **installed distribution** (`cd {{rig_path}} && uv run python -c 'import <module>'`) — not the source tree under `{{pack_path}}`. Importability is the consumer-side check that matters for that AC.
 
 # Read first
 

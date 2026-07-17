@@ -500,6 +500,36 @@ def _proof_evidence_failure(
     raise ValueError(f"unknown proof step: {step}")
 
 
+def _delegate_to_agentic_epic(
+    *,
+    issue_id: str,
+    rig: str,
+    rig_path: Path,
+    pack_path: Path,
+    iteration_budget: int,
+    dry_run: bool,
+    base_branch: str,
+) -> dict[str, Any]:
+    """Continue an oversized seed through the existing epic subflow.
+
+    The import is lazy because ``agentic_epic`` imports transport helpers from
+    this module. Calling the decorated flow here keeps the original ``po run``
+    accountable for the complete delegated graph instead of detaching work.
+    """
+    from po_formulas.agentic_epic import agentic_epic
+
+    return agentic_epic(
+        epic_id=issue_id,
+        rig=rig,
+        rig_path=str(rig_path),
+        pack_path=str(pack_path),
+        iter_cap=iteration_budget,
+        dry_run=dry_run,
+        shared_branch=True,
+        base_branch=base_branch,
+    )
+
+
 # ─────────────────────── flow ───────────────────────────────────────
 
 
@@ -680,9 +710,49 @@ def software_dev_agentic(
             },
         )
         if sizing.decision == "decompose":
-            raise agentic_sizing.DecompositionRequiredError(
-                agentic_sizing.decomposition_message(issue_id, sizing)
+            reason = sizing.decomposition_reason or sizing.rationale
+            verified_delivery.update(
+                run_dir,
+                {
+                    "terminal": {"state": "delegated", "reason": reason},
+                    "delegation": {
+                        "formula": "agentic-epic",
+                        "epic_id": issue_id,
+                        "status": "running",
+                    },
+                },
             )
+            logger.info(
+                "agentic: sizing delegated %s to agentic-epic (%s)",
+                issue_id,
+                reason,
+            )
+            epic_result = _delegate_to_agentic_epic(
+                issue_id=issue_id,
+                rig=rig,
+                rig_path=rig_path_p,
+                pack_path=pack_path_p,
+                iteration_budget=sizing.iteration_budget,
+                dry_run=dry_run,
+                base_branch=base_branch,
+            )
+            delegated_contract = verified_delivery.update(
+                run_dir,
+                {
+                    "delegation": {
+                        "formula": "agentic-epic",
+                        "epic_id": issue_id,
+                        "status": "completed",
+                        "result_status": epic_result.get("status"),
+                    }
+                },
+            )
+            return {
+                "status": "decomposed",
+                "epic_id": issue_id,
+                "epic_result": epic_result,
+                "verified_delivery": delegated_contract,
+            }
 
         critic_verdict = ""
         verifier_verdict = "not-required"
@@ -720,6 +790,7 @@ def software_dev_agentic(
             pr_evidence: dict[str, Any] | None = None
             preview_evidence: dict[str, Any] | None = None
             worker_branch = shared_branch.child_branch_name(issue_id)
+            verification_path = pack_path_p
             if not dry_run:
                 branch_base = epic_branch if shared_mode else base_branch
                 if shared_mode:
@@ -739,6 +810,13 @@ def software_dev_agentic(
                     head_branch=worker_branch,
                     target_branch=base_branch,
                 )
+                # The seed checkout may remain on main (or another long-lived
+                # branch) while the worker implements in a registered
+                # worktree. Every semantic and live proof role must inspect
+                # the exact checkout whose revision was mechanically proven.
+                verification_path = delivery_truth.worktree_for_branch(
+                    pack_path_p, worker_branch
+                )
                 if shared_mode and pr_evidence is not None:
                     raise delivery_truth.DeliveryTruthError(
                         f"shared child {worker_branch} opened a forbidden per-child PR"
@@ -749,12 +827,9 @@ def software_dev_agentic(
                         raise delivery_truth.DeliveryTruthError(
                             "preview identity proof currently requires PO_PREVIEW=local"
                         )
-                    worker_repo = delivery_truth.worktree_for_branch(
-                        pack_path_p, worker_branch
-                    )
                     preview_evidence = delivery_truth.localhost_preview_truth(
                         preview_candidate.splitlines()[-1].strip(),
-                        expected_repo=worker_repo,
+                        expected_repo=verification_path,
                         expected_revision=branch_evidence["head_sha"],
                     )
                 patch: dict[str, Any] = {
@@ -782,7 +857,7 @@ def software_dev_agentic(
                 iter_n=iter_n,
                 ctx={
                     "iter": iter_n,
-                    "pack_path": str(pack_path_p),
+                    "pack_path": str(verification_path),
                     "base_branch": base_branch,
                     "epic_branch": epic_branch or "",
                     "verified_delivery_path": str(
@@ -825,7 +900,10 @@ def software_dev_agentic(
                     run_dir=run_dir,
                     step="deploy-smoke",
                     iter_n=iter_n,
-                    ctx={"issue_id": issue_id, "pack_path": str(pack_path_p)},
+                    ctx={
+                        "issue_id": issue_id,
+                        "pack_path": str(verification_path),
+                    },
                     dry_run=dry_run,
                 )
                 _record_proof_result(
@@ -850,7 +928,10 @@ def software_dev_agentic(
                         run_dir=run_dir,
                         step="demo-video",
                         iter_n=iter_n,
-                        ctx={"issue_id": issue_id},
+                        ctx={
+                            "issue_id": issue_id,
+                            "pack_path": str(verification_path),
+                        },
                         verdict_keywords=("recorded", "skipped", "failed"),
                         dry_run=dry_run,
                     )
@@ -881,7 +962,10 @@ def software_dev_agentic(
                     run_dir=run_dir,
                     step="review-artifacts",
                     iter_n=iter_n,
-                    ctx={"issue_id": issue_id},
+                    ctx={
+                        "issue_id": issue_id,
+                        "pack_path": str(verification_path),
+                    },
                     dry_run=dry_run,
                 )
                 _record_proof_result(
@@ -914,7 +998,7 @@ def software_dev_agentic(
                     ctx={
                         "verify_iter": iter_n,
                         "prior_critique": fix_list,
-                        "pack_path": str(pack_path_p),
+                        "pack_path": str(verification_path),
                     },
                     verdict_keywords=("approved", "rejected"),
                     dry_run=dry_run,
