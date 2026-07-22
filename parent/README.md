@@ -71,6 +71,13 @@ deploy smoke, demo, review-artifact assembly, and live verifier. A rejection
 from either reviewer writes a concrete fix list and the actor reruns the whole
 proof chain after addressing it.
 
+The worker's assignment is a strict prompt-level scope fence: an auto-loaded
+skill or nearby issue cannot authorize adjacent work. The critic likewise
+declares a bounded read-only evidence set, stops when that set is exhausted,
+and returns its severity-ranked verdict in the same turn rather than waiting
+for an operator to interrupt exploration. These are judgment contracts in the
+role prompts, not deterministic task classifiers.
+
 Oversized multi-surface goals are delegated before the worker starts. The same
 flow invokes `agentic-epic` as a Prefect subflow, whose planner turns the goal
 into reviewed, dependency-ordered child beads and dispatches them. The original

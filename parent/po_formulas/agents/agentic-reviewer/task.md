@@ -15,6 +15,22 @@ shared mode): `{{epic_branch}}`. Resolved worker branch truth: `{{branch_truth}}
 Treat the delivery artifact as canonical for exact revisions and targets; do not
 infer these facts from the worker's prose.
 
+# Bounded read-only review contract
+
+Before read-only tools, declare the evidence set you will use: the original
+issue, applicable plan, current iteration diff, gate output, delivery artifact,
+and only the directly changed files or PR state needed to resolve a
+contradiction. Do not let an auto-loaded skill, a related incident, or a nearby
+repository enlarge that set.
+
+The stop condition is that declared evidence set being exhausted, or a concrete
+missing/contradictory artifact that itself decides the review. At that point,
+return a verdict in **this critic turn**; do not wait for operator interruption,
+keep exploring unrelated context, or turn a read-only review into implementation
+work. Report every finding in severity-ranked order (`blocker`, `major`, then
+`minor`), followed by `pass` with no findings or `fail` with the concrete
+numbered fix list.
+
 If the diff artifact is missing, read the committed change directly — inspect the actor's worktree branch `agentic-{{seed_id}}` (`git -C {{pack_path}} log --oneline main..agentic-{{seed_id}}`, `git -C {{pack_path}} diff main...agentic-{{seed_id}}`).
 
 # Judge

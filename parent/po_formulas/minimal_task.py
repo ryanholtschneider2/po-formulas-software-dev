@@ -35,7 +35,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from prefect import flow, get_run_logger
+from prefect import flow
 from prefect_orchestration.agent_step import agent_step
 from prefect_orchestration.beads_meta import claim_issue, close_issue
 
@@ -63,7 +63,6 @@ def minimal_task(
     Kwargs match the subset of `software_dev_full` that fanout
     dispatchers care about, so swapping formulas is a one-token change.
     """
-    logger = get_run_logger()
     rig_path_p = Path(rig_path).expanduser().resolve()
 
     if claim and not dry_run:

@@ -128,7 +128,7 @@ def _build_child_description(finding: dict[str, Any], parent_id: str) -> str:
         "",
         "## First action — work on a fresh branch",
         "",
-        f"Before editing, `cd` into the affected repo and create the branch:",
+        "Before editing, `cd` into the affected repo and create the branch:",
         "",
         "```bash",
         f"cd <rig_path>/{affected_repo}",

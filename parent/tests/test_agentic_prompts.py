@@ -61,6 +61,18 @@ def test_worker_prompt_critic_is_the_only_gate() -> None:
     assert "{{role_step_close_block}}" in raw
 
 
+def test_worker_scope_fence_rejects_irrelevant_skill_driven_work() -> None:
+    """Regression: a loaded skill cannot authorize adjacent task expansion."""
+    for rel in ("agentic-worker/prompt.md", "agentic-worker/task.md"):
+        text = _read(rel).lower()
+        assert "assignment scope fence" in text
+        assert "before invoking any tool" in text
+        assert "complete authorization" in text
+        assert "auto-loaded skill" in text
+        assert "authority to expand the assignment" in text
+        assert "do not investigate, modify, dispatch, or review it" in text
+
+
 def test_worker_task_signals_chosen_mode_and_pr() -> None:
     text = _read("agentic-worker/task.md").lower()
     assert "right-size your process to the ask" in text
@@ -95,6 +107,20 @@ def test_critic_does_not_merge_and_scales_to_ask() -> None:
     text = _read("agentic-reviewer/prompt.md").lower()
     assert "size of the ask" in text or "right-sized" in text
     assert "do not merge" in text or "not merge" in text
+
+
+def test_reviewer_bounded_evidence_contract_returns_ranked_verdict() -> None:
+    """Regression: read-only review finishes without operator interruption."""
+    for rel in ("agentic-reviewer/prompt.md", "agentic-reviewer/task.md"):
+        text = _read(rel).lower()
+        assert "bounded read-only review contract" in text
+        assert "evidence set" in text
+        assert "stop condition" in text
+        assert "this critic turn" in text
+        assert "do not wait for operator interruption" in text
+        assert "severity-ranked order" in text
+        assert "`blocker`, `major`, then" in text
+        assert "`minor`" in text
 
 
 def test_critic_learning_receipt_contract() -> None:
