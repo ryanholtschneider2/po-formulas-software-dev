@@ -11,6 +11,24 @@ iteration budgets. The expectations intentionally avoid semantic Python
 heuristics: the model judges each goal, while the harness checks only structured
 output and declared policy bounds.
 
+## Agentic prompt contracts
+
+`agentic-prompt-contract-cases.json` is a live behavioral corpus for the shared
+worker and critic prompts. It renders each shipped prompt/task pair into a
+disposable directory and uses subscription-backed Codex to verify that a worker
+rejects irrelevant skill-driven work and a critic returns a severity-ranked
+verdict when its declared evidence is exhausted.
+
+```bash
+uv run --project parent python \
+  parent/evals/run_agentic_prompt_contract_evals.py /tmp/agentic-prompt-contract
+```
+
+The evaluator stores each rendered role, constrained JSON response, and a
+`report.json` under the supplied output directory. The Python harness only
+checks the declared response shape and expected scenario outcome; the model
+performs the scope and review judgment.
+
 ## Integrated epic acceptance cases
 
 `agentic-epic-acceptance-cases.json` is the behavioral regression corpus for
