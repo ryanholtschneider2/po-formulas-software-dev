@@ -1244,3 +1244,184 @@ def test_per_child_formula_is_stamped(tmp_path, monkeypatch):
 
     assert (f"{epic_id}.1", "po.formula", "software-dev-agentic") in stamped
     assert (f"{epic_id}.2", "po.formula", "minimal-task") in stamped
+
+
+# ── Same-scope epic de-dup guard ─────────────────────────────────────────────
+
+
+def test_scope_fingerprint_stable():
+    """Same goal text always produces the same fingerprint."""
+    fp1 = ae._scope_fingerprint("do the deep research swipe")
+    fp2 = ae._scope_fingerprint("  Do The Deep Research Swipe  ")
+    assert fp1 == fp2
+    assert len(fp1) == 12
+
+
+def test_scope_fingerprint_differs_on_different_goal():
+    fp1 = ae._scope_fingerprint("deep research swipe for project A")
+    fp2 = ae._scope_fingerprint("implement the login page")
+    assert fp1 != fp2
+
+
+def test_acquire_scope_guard_writes_sentinel(tmp_path):
+    """First caller for a scope writes the guard file and returns None."""
+    epic_id = "rig-sg1"
+    goal = "do the thing"
+    conflict = ae._acquire_scope_guard(tmp_path, epic_id, goal, _NULL_LOGGER)
+    assert conflict is None
+    fp = ae._scope_fingerprint(goal)
+    guard_path = ae._scope_guard_path(tmp_path, fp)
+    assert guard_path.exists()
+    assert guard_path.read_text().strip() == epic_id
+
+
+def test_acquire_scope_guard_returns_conflict_for_in_progress_epic(
+    tmp_path, monkeypatch
+):
+    """Second caller with same scope and in-progress first epic gets the first epic_id back."""
+    goal = "do the thing"
+    epic_a = "rig-sga"
+    epic_b = "rig-sgb"
+
+    # Simulate epic_a wrote its guard first
+    fp = ae._scope_fingerprint(goal)
+    guard_path = ae._scope_guard_path(tmp_path, fp)
+    guard_path.parent.mkdir(parents=True, exist_ok=True)
+    guard_path.write_text(epic_a)
+
+    # epic_a is still in_progress
+    monkeypatch.setattr(ae, "_bd_show_status", lambda eid, rp: "in_progress")
+
+    conflict = ae._acquire_scope_guard(tmp_path, epic_b, goal, _NULL_LOGGER)
+    assert conflict == epic_a
+    # Guard file still has epic_a (not overwritten)
+    assert guard_path.read_text().strip() == epic_a
+
+
+def test_acquire_scope_guard_overwrites_stale_closed_epic(tmp_path, monkeypatch):
+    """If the prior sentinel's epic is closed, the guard is stale and gets overwritten."""
+    goal = "do the thing"
+    epic_a = "rig-sga"
+    epic_b = "rig-sgb"
+
+    fp = ae._scope_fingerprint(goal)
+    guard_path = ae._scope_guard_path(tmp_path, fp)
+    guard_path.parent.mkdir(parents=True, exist_ok=True)
+    guard_path.write_text(epic_a)
+
+    monkeypatch.setattr(ae, "_bd_show_status", lambda eid, rp: "closed")
+
+    conflict = ae._acquire_scope_guard(tmp_path, epic_b, goal, _NULL_LOGGER)
+    assert conflict is None
+    assert guard_path.read_text().strip() == epic_b
+
+
+def test_release_scope_guard_removes_own_sentinel(tmp_path):
+    """_release_scope_guard removes the sentinel written by _acquire_scope_guard."""
+    goal = "do the thing"
+    epic_id = "rig-rel1"
+    ae._acquire_scope_guard(tmp_path, epic_id, goal, _NULL_LOGGER)
+    ae._release_scope_guard(tmp_path, epic_id, goal)
+    fp = ae._scope_fingerprint(goal)
+    assert not ae._scope_guard_path(tmp_path, fp).exists()
+
+
+def test_release_scope_guard_does_not_remove_other_epics_sentinel(tmp_path):
+    """_release_scope_guard is a no-op when the sentinel belongs to another epic."""
+    goal = "do the thing"
+    fp = ae._scope_fingerprint(goal)
+    guard_path = ae._scope_guard_path(tmp_path, fp)
+    guard_path.parent.mkdir(parents=True, exist_ok=True)
+    guard_path.write_text("other-epic")
+
+    ae._release_scope_guard(tmp_path, "my-epic", goal)
+    assert guard_path.read_text().strip() == "other-epic"
+
+
+def test_agentic_epic_same_scope_skips_duplicate(tmp_path, monkeypatch):
+    """When a same-scope guard fires (another in-progress epic holds the scope),
+    agentic_epic returns a skipped-same-scope result without decomposing."""
+    epic_id = "rig-dup1"
+    conflict_id = "rig-dup0"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {
+        "children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]
+    }
+    _patch_common(monkeypatch, run_dir, plan)
+
+    agent_step_calls: list[str] = []
+
+    def tracking_agent_step(*, step, **kwargs):
+        agent_step_calls.append(step)
+
+        class _R:
+            verdict = "pass"
+            closed_by = "agent"
+
+        return _R()
+
+    monkeypatch.setattr(ae, "agent_step", tracking_agent_step)
+    # The guard reports a conflict
+    monkeypatch.setattr(
+        ae, "_acquire_scope_guard", lambda rp, eid, goal, logger: conflict_id
+    )
+    monkeypatch.setattr(ae, "_release_scope_guard", lambda *a, **k: None)
+
+    result = ae.agentic_epic.fn(epic_id=epic_id, rig="r", rig_path=str(tmp_path))
+
+    assert result["status"] == "skipped-same-scope"
+    assert result["conflicting_epic"] == conflict_id
+    # No decomposition or dispatch should have run
+    assert agent_step_calls == []
+
+
+def test_agentic_epic_force_replan_skips_scope_guard(tmp_path, monkeypatch):
+    """force_replan=True bypasses the same-scope guard entirely."""
+    epic_id = "rig-force1"
+    run_dir = tmp_path / ".planning" / "agentic-epic" / epic_id
+    plan = {
+        "children": [{"key": "1", "title": "a", "description": "d", "depends_on": []}]
+    }
+    # Pre-write the plan so _parse_plan succeeds without relying on agent_step.
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / ae._PLAN_FILE).write_text(json.dumps(plan))
+
+    _patch_common(monkeypatch, run_dir, plan)
+
+    acquire_calls: list[str] = []
+
+    def spy_acquire(rp, eid, goal, logger):
+        acquire_calls.append(eid)
+        return None
+
+    monkeypatch.setattr(ae, "_acquire_scope_guard", spy_acquire)
+    monkeypatch.setattr(ae, "_release_scope_guard", lambda *a, **k: None)
+    monkeypatch.setattr(ae, "_existing_planned_children", lambda eid, rp: [])
+    monkeypatch.setattr(
+        ae.sb,
+        "create_integration_branch",
+        lambda rp, eid, **k: {
+            "branch": f"epic/{eid}",
+            "created": True,
+            "pushed": True,
+            "remote": True,
+        },
+    )
+    monkeypatch.setattr(
+        ae.sb,
+        "open_draft_pr",
+        lambda rp, **k: {"opened": True, "url": "u", "reason": ""},
+    )
+    monkeypatch.setattr(
+        ae.sb, "mark_pr_ready", lambda rp, **k: {"ready": True, "reason": ""}
+    )
+    monkeypatch.setattr(ae.sb, "cleanup_integration_worktree", lambda rp, eid: None)
+    monkeypatch.setattr(ae.sb, "commits_ahead", lambda rp, base, branch: 1)
+    monkeypatch.setattr(ae, "graph_run", lambda **k: {"status": "ok"})
+
+    ae.agentic_epic.fn(
+        epic_id=epic_id, rig="r", rig_path=str(tmp_path), force_replan=True
+    )
+
+    # Guard should NOT have been acquired in force_replan mode
+    assert acquire_calls == []

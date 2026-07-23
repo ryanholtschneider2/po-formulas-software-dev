@@ -59,6 +59,7 @@ children) — the fix is a dep, not deterministic conflict-resolution code.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -90,6 +91,104 @@ _PLAN_FILE = "plan.json"
 _PRD_FILE = "prd.md"
 _ACCEPTANCE_MANIFEST_FILE = "acceptance-manifest.json"
 _CHILD_FORMULA = "software-dev-agentic"
+
+_SCOPE_GUARD_DIR_NAME = ".scope-guards"
+
+
+def _scope_fingerprint(goal: str) -> str:
+    """Stable 12-hex fingerprint of a normalized goal text.
+
+    Two epics dispatched for the same scope typically have identical (or
+    near-identical) descriptions. We hash the first 400 chars after
+    collapsing whitespace so small edits (a trailing newline, a one-word
+    preamble) don't defeat the check.
+    """
+    normalized = re.sub(r"\s+", " ", goal.strip().lower())[:400]
+    return hashlib.sha1(normalized.encode()).hexdigest()[:12]
+
+
+def _scope_guard_path(rig_path: Path, fingerprint: str) -> Path:
+    return rig_path / ".planning" / "agentic-epic" / _SCOPE_GUARD_DIR_NAME / fingerprint
+
+
+def _bd_show_status(epic_id: str, rig_path: Path) -> str:
+    """Return the bead's status string, or 'unknown' on error."""
+    proc = subprocess.run(
+        ["bd", "show", epic_id, "--json"],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=str(rig_path),
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return "unknown"
+    try:
+        row = json.loads(proc.stdout)
+        if isinstance(row, list):
+            row = row[0] if row else {}
+        return str(row.get("status") or "unknown")
+    except (json.JSONDecodeError, IndexError, AttributeError):
+        return "unknown"
+
+
+def _acquire_scope_guard(
+    rig_path: Path, epic_id: str, goal: str, logger: Any
+) -> str | None:
+    """Write a scope-guard sentinel for this epic and goal.
+
+    Returns the conflicting epic_id when another in-progress epic holds the
+    same scope guard, otherwise None (guard acquired or existing guard is
+    stale). Always writes our sentinel on return of None so the rig-level
+    lock is held while this flow runs.
+    """
+    if not goal.strip():
+        return None  # no goal → can't fingerprint; skip the guard
+    fp = _scope_fingerprint(goal)
+    guard_path = _scope_guard_path(rig_path, fp)
+    guard_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if guard_path.exists():
+        try:
+            existing_id = guard_path.read_text().strip()
+        except OSError:
+            existing_id = ""
+        if existing_id and existing_id != epic_id:
+            status = _bd_show_status(existing_id, rig_path)
+            if status in ("open", "in_progress"):
+                logger.warning(
+                    "agentic-epic: same-scope guard fired — %s is already "
+                    "in-flight for scope %s (goal fingerprint %s); "
+                    "skipping decomposition + dispatch to avoid duplicate fan-out. "
+                    "Pass force_replan=True to override.",
+                    existing_id,
+                    fp,
+                    fp,
+                )
+                return existing_id
+            # Guard is stale (prior epic is closed or unknown); overwrite.
+            logger.info(
+                "agentic-epic: scope guard for %s is stale (%s is %s); overwriting with %s",
+                fp,
+                existing_id,
+                status,
+                epic_id,
+            )
+
+    guard_path.write_text(epic_id)
+    return None
+
+
+def _release_scope_guard(rig_path: Path, epic_id: str, goal: str) -> None:
+    """Remove our scope-guard sentinel when the flow exits."""
+    if not goal.strip():
+        return
+    fp = _scope_fingerprint(goal)
+    guard_path = _scope_guard_path(rig_path, fp)
+    try:
+        if guard_path.exists() and guard_path.read_text().strip() == epic_id:
+            guard_path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _bd_show_description(epic_id: str, rig_path: Path) -> str:
@@ -883,7 +982,33 @@ def agentic_epic(
     goal = _bd_show_description(epic_id, rig_path_p)
     (run_dir / "goal.md").write_text(goal or f"(no description on {epic_id})")
 
+    # ── Same-scope de-dup guard ───────────────────────────────────────────────
+    # Check if another epic with an identical (or near-identical) goal is
+    # already in-flight on this rig. Write our sentinel so we hold the scope
+    # while running; release it in the finally block. Skip in dry_run and
+    # force_replan modes (those are deliberate re-runs or tests).
+    conflicting_epic: str | None = None
+    if not (dry_run or force_replan):
+        conflicting_epic = _acquire_scope_guard(rig_path_p, epic_id, goal, logger)
+
     try:
+        # ── Same-scope bail-out ──────────────────────────────────────────────
+        # A conflicting in-flight epic was found; skip decomposition + dispatch
+        # to prevent the runaway fan-out pattern (soloco-kol8q incident: 43
+        # concurrent flows from overlapping duplicate epics). The epic bead is
+        # left open so the operator can re-dispatch after the original finishes
+        # or close the duplicate manually.
+        if conflicting_epic is not None:
+            return {
+                "status": "skipped-same-scope",
+                "epic_id": epic_id,
+                "conflicting_epic": conflicting_epic,
+                "reason": (
+                    f"same-scope guard: {conflicting_epic} is already in-flight "
+                    f"for this goal; coalescing duplicate dispatch"
+                ),
+            }
+
         # ── Phases 1-3: decompose, UNLESS this epic was already decomposed ──
         # Idempotency guard (2026-06-14 runaway fix): if planned children already
         # exist under the epic, do NOT re-decompose — reuse them. Phase 4 below
@@ -1115,6 +1240,12 @@ def agentic_epic(
     except Exception as exc:
         _record_flow_outcome(run_dir, exc, epic_id, str(rig_path_p))
         raise
+    finally:
+        # Release the scope guard so a legitimate re-run after this flow exits
+        # doesn't see a stale sentinel. No-op when force_replan/dry_run (guard
+        # was never acquired).
+        if not (dry_run or force_replan):
+            _release_scope_guard(rig_path_p, epic_id, goal)
 
 
 __all__ = ["agentic_epic"]
