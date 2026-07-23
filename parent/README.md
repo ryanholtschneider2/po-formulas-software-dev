@@ -435,9 +435,9 @@ po run epic \
   --rig-path /home/ryan-24/Desktop/Code/personal/nanocorps/seam-recruiting/site
 
 # Discovery flags (prefect-orchestration-h5s):
-#   --discover {ids,deps,both}    # default: both (deps + dot-suffix union)
-#   --child-ids a,b,c             # explicit override; bypasses discovery
-po run epic --epic-id sr-8yu --rig site --rig-path ... --discover deps
+#   --discover {parent-child,ids,deps,both}   # default: parent-child
+#   --child-ids a,b,c                          # explicit override; bypasses discovery
+po run epic --epic-id sr-8yu --rig site --rig-path ... --discover both
 po run epic --epic-id sr-8yu --rig site --rig-path ... \
             --child-ids sr-8yu-feat-a,sr-8yu-feat-b,sr-8yu-feat-c
 
@@ -447,14 +447,22 @@ po run software-dev-full --dry-run --issue-id sr-8yu.3 ...
 
 ### Epic discovery modes
 
-`epic_run` resolves the children of `--epic-id` using one of three
-strategies, controlled by `--discover` (default `both`):
+`epic_run` resolves the children of `--epic-id` using one of four
+strategies, controlled by `--discover` (default `parent-child`):
 
 | Mode | What it does |
 |---|---|
+| `parent-child` | **Default.** Walk ONLY parent-child edges rooted at `--epic-id` to collect the child set. `blocks` edges are still used to topo-order *within* the set, but they do NOT widen it — so dispatching an epic that another epic `blocks`-depends on no longer pulls that sibling epic (and its children) into the run. |
 | `ids` | Probe `<epic>.1`, `<epic>.2`, … (gas-city naming convention). Fast; no `bd dep` graph needed. |
-| `deps` | Walk the `bd dep` graph (parent-child + blocks edges) rooted at `--epic-id`. Works for any sub-graph; no naming convention required. |
-| `both` | Run both walkers, union with stable de-dup (deps order first, then dot-suffix-only ids appended). Default. |
+| `deps` | Walk the `bd dep` graph (parent-child **+ blocks** edges) rooted at `--epic-id`. The blocks walk widens the discovered set. |
+| `both` | Run the `deps` and `ids` walkers, union with stable de-dup (deps order first, then dot-suffix-only ids appended). |
+
+> **Why `parent-child` is the default (po-formulas-software-dev-e9s):**
+> `deps` / `both` walk `blocks` edges *up* to widen discovery. When EpicB
+> `blocks`-depends on EpicA, dispatching EpicA with a blocks-walking mode
+> discovered EpicB + all of EpicB's children and started them in parallel —
+> inverting the dependency. `parent-child` keeps `blocks` for ordering only.
+> Pass `--discover both` to opt back into the blocks-aware union.
 
 `--child-ids a,b,c` is the escape hatch: it skips discovery, validates
 each id exists and is open, and dispatches them in topo order built

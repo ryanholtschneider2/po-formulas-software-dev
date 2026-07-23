@@ -35,7 +35,7 @@ from typing import Any
 
 from prefect import flow, get_run_logger
 
-from po_formulas_wts.epic import epic_run
+from po_formulas_wts.epic import PARENT_CHILD_DISCOVER, epic_run
 from po_formulas_wts.epic_finalize import epic_finalize
 from po_formulas_wts.pre_pr_review import pre_pr_review
 from po_formulas_wts.pr_writer import pr_writer
@@ -69,7 +69,7 @@ def epic_wts(
     skip_pr_writer: bool = False,
     ci_timeout_s: int | None = None,
     max_issues: int | None = None,
-    discover: str = "both",
+    discover: str = PARENT_CHILD_DISCOVER,
     child_ids: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
