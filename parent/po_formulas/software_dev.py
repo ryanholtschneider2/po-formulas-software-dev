@@ -1163,25 +1163,37 @@ def software_dev_fast(
         has_ui=False,
     )
 
-    # Linter + tester auto-fix as part of their normal work; close when
-    # they return regardless of verdict. If something was genuinely
-    # un-fixable the verdict is recorded for forensic inspection but
-    # we don't gate the close on it (per "when done fixing we are done").
-    if claim and not dry_run:
-        close_issue(
-            issue_id,
-            notes=format_handoff_note("po fast-mode complete", run_dir),
-            rig_path=rig_path_p,
-        )
-    if lint_result.verdict != "clean" or unit_result.verdict != "passed":
+    # Close-as-success only when BOTH gates produced a clean/passed verdict.
+    # An empty verdict means the role's verdict file was never written — the
+    # lint/test step didn't run or its result is unknown. Treating that as
+    # "good enough to close" is exactly the blind spot that let 6 real
+    # regressions through the pd-17lv CDR-A series (the tester reported
+    # "passed" while 9 modules failed to import, and every child closed with
+    # an empty lint verdict). So: empty OR non-clean lint, or empty OR
+    # non-passed unit test → do NOT auto-close; leave the seed open and
+    # return status="needs-review" so the caller can re-dispatch or escalate
+    # to software-dev-full. This matches this flow's documented contract
+    # ("Seed closes only if lint is clean and unit tests pass").
+    gates_green = lint_result.verdict == "clean" and unit_result.verdict == "passed"
+    if gates_green:
+        if claim and not dry_run:
+            close_issue(
+                issue_id,
+                notes=format_handoff_note("po fast-mode complete", run_dir),
+                rig_path=rig_path_p,
+            )
+    else:
         logger.warning(
-            "fast-mode: closed despite non-clean verdicts (lint=%s, test-unit=%s)",
+            "fast-mode: NOT auto-closing %s — required gate(s) not clean/passed "
+            "(lint=%r, test-unit=%r); an empty verdict means the step didn't run "
+            "or its result is unknown. Leaving seed open for review.",
+            issue_id,
             lint_result.verdict,
             unit_result.verdict,
         )
 
     return {
-        "status": "completed",
+        "status": "completed" if gates_green else "needs-review",
         "mode": "fast",
         "lint_verdict": lint_result.verdict,
         "test_unit_verdict": unit_result.verdict,
